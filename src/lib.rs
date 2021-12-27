@@ -31,15 +31,13 @@ mod test {
 
     use env_logger;
 
-    use crate::*;
-
     pub fn init_env_logging() {
         static LOGGER: Once = Once::new();
         LOGGER.call_once(|| {
             let counter: AtomicU64 = AtomicU64::new(0);
             let seq_num = move || counter.fetch_add(1, Ordering::Relaxed);
 
-            let start = std::time::Instant::now();
+            let start = time::Instant::now();
 
             env_logger::Builder::from_default_env()
                 .format(move |buf, record| {
@@ -53,7 +51,7 @@ mod test {
                         record.level().as_str(),
                         record.file().unwrap_or(""),
                         record.line().unwrap_or(0),
-                        std::thread::current().name().unwrap_or("UNKNOWN"),
+                        thread::current().name().unwrap_or("UNKNOWN"),
                         record.args()
                     )
                 })

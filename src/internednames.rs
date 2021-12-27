@@ -8,6 +8,7 @@ use std::collections::HashSet;
 
 /// Storage for all interned names.
 pub struct InternedNames {
+    // PLANNED: rwlock / upgrade/ retry on new name
     cached_names: Mutex<HashSet<InternedName>>,
 }
 
