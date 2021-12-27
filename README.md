@@ -11,7 +11,7 @@ PriorityQueue. Sending a 'directory' to this queue let one thread pick it up and
 directory. Each element found is then send to a custom function/closure which may decides on
 how to process it:
  * Directories can be send again into the input PriorityQueue where other
-   threads may pick them up. This happens util the input queue is exhausted, eventually traversing
+   threads may pick them up. This happens until the input queue is exhausted, eventually traversing
    all sub-directories of the directory send initially.
  * Files and Directories can be send to an output mcmp queue where they can be further
    processed.
