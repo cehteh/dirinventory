@@ -46,9 +46,9 @@ impl DirectoryGatherMessage {
 //#[derive(Debug)] FIXME: openat::Metadata is not Debug
 pub enum InventoryEntryMessage {
     /// Passes a lightweight openat::Entry and the associated path, no stat() calls are needed.
-    Entry(openat::Entry, Arc<ObjectPath>),
+    Entry(Arc<openat::Entry>, Arc<ObjectPath>),
     /// Passes openat::Metadata and the associated path. The user has to crete the metadata which may involve costly stat() calls.
-    Metadata(openat::Metadata, Arc<ObjectPath>),
+    Metadata(Arc<openat::Metadata>, Arc<ObjectPath>),
     /// The Gaterers only pass errors up but try to continue.
     Err(Error),
     /// Message when the input queues got empty and no gathering thread still processes any data.
