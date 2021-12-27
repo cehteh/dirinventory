@@ -11,6 +11,9 @@ categories = ["filesystem"]
 documentation = "http://docs.rs/dirinventory"
 edition = "2021"
 
+[profile.release]
+lto = true
+
 [dependencies]
 openat_ct = "0.2.0-pre4"
 log = "0.4"
