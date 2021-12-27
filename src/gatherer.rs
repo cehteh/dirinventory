@@ -120,7 +120,7 @@ impl Gatherer {
     /// Spawns a single gatherer thread
     fn spawn_gather_thread(self: Arc<Self>, n: usize) -> io::Result<thread::JoinHandle<()>> {
         thread::Builder::new()
-            .name(format!("rmrfd/gather/{}", n))
+            .name(format!("dir/gather/{}", n))
             .spawn(move || {
                 loop {
                     use DirectoryGatherMessage::*;
