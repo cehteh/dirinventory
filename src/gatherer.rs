@@ -268,7 +268,6 @@ mod test {
         receiver
             .iter()
             .take_while(|msg| !matches!(msg, InventoryEntryMessage::Done))
-            .enumerate()
             .for_each(|msg| {
                 if let Some(path) = msg.path() {
                     let _ = stdout.write_all(path.to_pathbuf().as_os_str().as_bytes());
