@@ -210,7 +210,7 @@ impl GathererHandle<'_> {
             .send_dir(message.with_parent(parent_dir), dir_prio + entry.inode());
     }
 
-    /// Sends an openat::Entry found to the output queue
+    /// Sends openat::Entry components to the output queue
     pub fn output_entry(&self, entry: &openat::Entry, parent_path: Arc<ObjectPath>) {
         let entryname =
             ObjectPath::subobject(parent_path, self.0.names.interning(entry.file_name()));
@@ -219,6 +219,19 @@ impl GathererHandle<'_> {
             entry.simple_type(),
             entry.inode(),
         ));
+    }
+
+    /// Sends openat::Metadata to the output queue
+    pub fn output_metadata(
+        &self,
+        entry: &openat::Entry,
+        parent_path: Arc<ObjectPath>,
+        metadata: openat::Metadata,
+    ) {
+        let entryname =
+            ObjectPath::subobject(parent_path, self.0.names.interning(entry.file_name()));
+        self.0
+            .send_entry(InventoryEntryMessage::Metadata(entryname, metadata));
     }
 }
 
@@ -266,6 +279,82 @@ mod test {
         })
         .unwrap();
         inventory.load_dir_recursive(ObjectPath::new("."));
+
+        let mut stdout = std::io::stdout();
+
+        receiver
+            .iter()
+            .take_while(|msg| !matches!(msg, InventoryEntryMessage::Done))
+            .for_each(|msg| {
+                if let Some(path) = msg.path() {
+                    let _ = stdout.write_all(path.to_pathbuf().as_os_str().as_bytes());
+                    let _ = stdout.write_all(b"\n");
+                }
+            });
+    }
+
+    #[test]
+    fn entry_messages() {
+        crate::test::init_env_logging();
+
+        let (inventory, receiver) = Gatherer::new(24, 524288, &|gatherer: GathererHandle,
+                                                                entry: openat::Entry,
+                                                                parent_path: Arc<ObjectPath>,
+                                                                parent_dir: Arc<openat::Dir>|
+         -> Result<(), Error> {
+            match entry.simple_type() {
+                Some(openat::SimpleType::Dir) => {
+                    gatherer.traverse_dir(&entry, parent_path.clone(), parent_dir.clone());
+                }
+                _ => {
+                    gatherer.output_entry(&entry, parent_path);
+                }
+            }
+            Ok(())
+        })
+        .unwrap();
+        inventory.load_dir_recursive(ObjectPath::new("src"));
+
+        let mut stdout = std::io::stdout();
+
+        receiver
+            .iter()
+            .take_while(|msg| !matches!(msg, InventoryEntryMessage::Done))
+            .for_each(|msg| {
+                if let Some(path) = msg.path() {
+                    let _ = stdout.write_all(path.to_pathbuf().as_os_str().as_bytes());
+                    let _ = stdout.write_all(b"\n");
+                }
+            });
+    }
+
+    #[test]
+    fn metadata_messages() {
+        crate::test::init_env_logging();
+
+        let (inventory, receiver) = Gatherer::new(24, 524288, &|gatherer: GathererHandle,
+                                                                entry: openat::Entry,
+                                                                parent_path: Arc<ObjectPath>,
+                                                                parent_dir: Arc<openat::Dir>|
+         -> Result<(), Error> {
+            match entry.simple_type() {
+                Some(openat::SimpleType::Dir) => {
+                    gatherer.traverse_dir(&entry, parent_path.clone(), parent_dir.clone());
+                }
+                _ => {
+                    gatherer.output_metadata(
+                        &entry,
+                        parent_path,
+                        parent_dir
+                            .metadata(entry.file_name())
+                            .context("failed to create metadata")?,
+                    );
+                }
+            }
+            Ok(())
+        })
+        .unwrap();
+        inventory.load_dir_recursive(ObjectPath::new("src"));
 
         let mut stdout = std::io::stdout();
 
