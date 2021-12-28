@@ -31,3 +31,8 @@ demands a ObjectPath implementation encodes any path by its filename and a refer
 parent directory. Futher all names are interned thus same names would require only memory once
 for their storage.
 
+# Benchmarking Results
+
+See the 'BENCH.md' file for some tests. As baseline was the 'gnu find' utility chosen. In the
+most extreme case this code can perform directory traversal 20 times faster. With slow
+spinning disks and moderate settings (16 threads) 1.6 times faster.
