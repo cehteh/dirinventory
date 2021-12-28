@@ -1,31 +1,31 @@
 use std::path::Path;
 use std::ffi::{OsStr, OsString};
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::borrow::Borrow;
 use std::ops::Deref;
 use std::collections::HashSet;
+use std::os::unix::ffi::OsStrExt;
 
-/// Storage for all interned names.
-pub struct InternedNames {
-    // PLANNED: rwlock / upgrade/ retry on new name
-    cached_names: Mutex<HashSet<InternedName>>,
+use parking_lot::Mutex;
+
+/// Storage for all interned names. using a sharded HashSet with N shards
+pub struct InternedNames<const N: usize> {
+    cached_names: [Mutex<HashSet<InternedName>>; N],
 }
 
-impl InternedNames {
+impl<const N: usize> InternedNames<N> {
     /// Create a new InternedNames storage
-    pub fn new() -> InternedNames {
+    pub fn new() -> InternedNames<N> {
         InternedNames {
-            cached_names: Mutex::new(HashSet::new()),
+            cached_names: [(); N].map(|()| Mutex::new(HashSet::new())),
         }
     }
 
     /// interns the given name from a reference by either creating a new instance or
     /// returning a reference to the existing instance.
     pub fn interning(&self, name: &OsStr) -> InternedName {
-        self.cached_names
+        self.cached_names[name.bucket::<N>()]
             .lock()
-            .unwrap()
             .get_or_insert_with(name, InternedName::new)
             .clone()
     }
@@ -35,7 +35,7 @@ impl InternedNames {
     // }
 }
 
-impl Default for InternedNames {
+impl<const N: usize> Default for InternedNames<N> {
     fn default() -> Self {
         Self::new()
     }
@@ -76,5 +76,21 @@ impl Clone for InternedName {
 impl AsRef<Path> for InternedName {
     fn as_ref(&self) -> &Path {
         Path::new(&*self.0)
+    }
+}
+
+/// Defines into which bucket a key falls.
+trait Bucketize {
+    fn bucket<const N: usize>(&self) -> usize;
+}
+
+/// OsStr specialization just sums up all characters modulo buckets
+impl Bucketize for OsStr {
+    fn bucket<const N: usize>(&self) -> usize {
+        self.as_bytes()
+            .iter()
+            .map(|a| usize::from(*a))
+            .sum::<usize>()
+            % N
     }
 }

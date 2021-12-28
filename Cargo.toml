@@ -11,17 +11,18 @@ categories = ["filesystem"]
 documentation = "http://docs.rs/dirinventory"
 edition = "2021"
 
-[profile.release]
-lto = true
-
 [dependencies]
 openat_ct = "0.2.0-pre4"
 log = "0.4"
 easy-error = "1.0.0"
 crossbeam-channel = "0.5"
+parking_lot = "0.11.2"
 
 [dev-dependencies]
 env_logger = "0.9"
+
+[profile.release]
+lto = true
 
 [badges]
 maintenance = { status = "actively-developed" }

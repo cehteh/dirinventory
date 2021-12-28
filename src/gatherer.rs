@@ -24,7 +24,7 @@ type ProcessFn = dyn Fn(GathererHandle, openat::Entry, Arc<ObjectPath>, Arc<open
 /// and needs to have a global picture of all indexed files.
 pub struct Gatherer {
     /// All file/dir names are interned here
-    names: InternedNames,
+    names: InternedNames<32>,
 
     /// The processing function
     processor: &'static ProcessFn,
@@ -132,7 +132,6 @@ impl Gatherer {
                     match self.dirs_queue.recv().entry() {
                         QueueEntry::Entry(TraverseDirectory { path, parent_dir }, _prio) => {
                             match &parent_dir {
-                                // TODO: into function, check if fadvise improves performance
                                 // TODO: when out of file handles then reinsert into queue and
                                 // sleep this thread for 50ms (or find a better way to notify
                                 // when to continue)
