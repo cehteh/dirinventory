@@ -4,6 +4,7 @@ use std::fmt::{Debug, Formatter, Result};
 use crate::openat;
 use crate::ObjectPath;
 use crate::Error;
+use crate::openat::{metadata_types::ino_t, SimpleType};
 
 /// Messages on the input queue, directories to be processed.
 #[derive(Debug)]
@@ -45,10 +46,10 @@ impl DirectoryGatherMessage {
 /// Messages on the output queue, collected entries, 'Done' when the queue becomes empty and errors passed up
 //#[derive(Debug)] FIXME: openat::Metadata is not Debug
 pub enum InventoryEntryMessage {
-    /// Passes a lightweight openat::Entry and the associated path, no stat() calls are needed.
-    Entry(Arc<openat::Entry>, Arc<ObjectPath>),
-    /// Passes openat::Metadata and the associated path. The user has to crete the metadata which may involve costly stat() calls.
-    Metadata(Arc<openat::Metadata>, Arc<ObjectPath>),
+    /// Passes the path and lightweight data from an openat::Entry, no stat() calls are needed.
+    Entry(Arc<ObjectPath>, Option<SimpleType>, ino_t),
+    /// Passes the path and openat::Metadata. The user has to crete the metadata which may involve costly stat() calls.
+    Metadata(Arc<ObjectPath>, openat::Metadata),
     /// The Gaterers only pass errors up but try to continue.
     Err(Error),
     /// Message when the input queues got empty and no gathering thread still processes any data.
@@ -60,8 +61,8 @@ impl Debug for InventoryEntryMessage {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
         use InventoryEntryMessage::*;
         match self {
-            Entry(_, path) => write!(f, "Entry {:?}", path.to_pathbuf()),
-            Metadata(_, path) => write!(f, "Metadata {:?}", path.to_pathbuf()),
+            Entry(path, _, _) => write!(f, "Entry {:?}", path.to_pathbuf()),
+            Metadata(path, _) => write!(f, "Metadata {:?}", path.to_pathbuf()),
             Err(err) => write!(f, "Error {:?}", err),
             Done => write!(f, "Done"),
         }
@@ -73,8 +74,8 @@ impl InventoryEntryMessage {
     pub fn path(&self) -> Option<&ObjectPath> {
         use InventoryEntryMessage::*;
         match self {
-            Entry(_, path) => Some(path),
-            Metadata(_, path) => Some(path),
+            Entry(path, _, _) => Some(path),
+            Metadata(path, _) => Some(path),
             _ => None,
         }
     }

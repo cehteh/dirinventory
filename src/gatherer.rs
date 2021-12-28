@@ -192,7 +192,7 @@ impl GathererHandle<'_> {
     /// Add a sub directory to the input priority queue to be traversed as well.
     pub fn traverse_dir(
         &self,
-        entry: Arc<openat::Entry>,
+        entry: &openat::Entry,
         parent_path: Arc<ObjectPath>,
         parent_dir: Arc<openat::Dir>,
     ) {
@@ -211,11 +211,14 @@ impl GathererHandle<'_> {
     }
 
     /// Sends an openat::Entry found to the output queue
-    pub fn output_entry(&self, entry: Arc<openat::Entry>, parent_path: Arc<ObjectPath>) {
+    pub fn output_entry(&self, entry: &openat::Entry, parent_path: Arc<ObjectPath>) {
         let entryname =
             ObjectPath::subobject(parent_path, self.0.names.interning(entry.file_name()));
-        self.0
-            .send_entry(InventoryEntryMessage::Entry(entry, entryname));
+        self.0.send_entry(InventoryEntryMessage::Entry(
+            entryname,
+            entry.simple_type(),
+            entry.inode(),
+        ));
     }
 }
 
@@ -245,19 +248,18 @@ mod test {
     fn load_dir() {
         crate::test::init_env_logging();
 
-        let (inventory, receiver) = Gatherer::new(16, 65536, &|gatherer: GathererHandle,
-                                                               entry: openat::Entry,
-                                                               parent_path: Arc<ObjectPath>,
-                                                               parent_dir: Arc<openat::Dir>|
+        let (inventory, receiver) = Gatherer::new(24, 524288, &|gatherer: GathererHandle,
+                                                                entry: openat::Entry,
+                                                                parent_path: Arc<ObjectPath>,
+                                                                parent_dir: Arc<openat::Dir>|
          -> Result<(), Error> {
             match entry.simple_type() {
                 Some(openat::SimpleType::Dir) => {
-                    let entry = Arc::new(entry);
-                    gatherer.traverse_dir(entry.clone(), parent_path.clone(), parent_dir.clone());
-                    gatherer.output_entry(entry, parent_path);
+                    gatherer.traverse_dir(&entry, parent_path.clone(), parent_dir.clone());
+                    gatherer.output_entry(&entry, parent_path);
                 }
                 _ => {
-                    gatherer.output_entry(Arc::new(entry), parent_path);
+                    gatherer.output_entry(&entry, parent_path);
                 }
             }
             Ok(())
