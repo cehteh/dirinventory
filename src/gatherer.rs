@@ -37,39 +37,11 @@ pub struct Gatherer {
 }
 
 impl Gatherer {
-    /// Create an Gatherer.  'num_gather_threads' is the number of threads which traverse the
-    /// directories. These are IO-bound operations and the more threads are used the better
-    /// are the opportunities for the kernel to optimize IO-Requests. Tests have shown that on
-    /// fast SSD's and cached data thread numbers in the hundrededs still show some benefits
-    /// (at high resource costs). For general operation and on slower HDD's / non cached data
-    /// 8-64 threads should be good enough. The 'inventory_backlog' is the about of entries
-    /// the bounded output queue can hold. For cached and readahead data, the kernel can send
-    /// bursts entries to the gatherer threads at very high speeds, since we don't want to
-    /// stall the gathering, the is adds some output buffering. Usually values from 64k to
-    /// 512k should be fine here.
-    ///
-    /// Returns a Result tuple with an Arc<Gatherer> and the receiving end of the output queue.
-    pub fn new(
-        num_gather_threads: usize,
-        inventory_backlog: usize,
-        processor: &'static ProcessFn,
-    ) -> io::Result<(Arc<Gatherer>, Receiver<InventoryEntryMessage>)> {
-        let (inventory_send_queue, receiver) = bounded(inventory_backlog);
-
-        let gatherer = Arc::new(Gatherer {
-            names: InternedNames::new(),
-            dirs_queue: PriorityQueue::new(),
-            inventory_send_queue,
-            processor,
-        });
-
-        (0..num_gather_threads).try_for_each(|n| -> io::Result<()> {
-            gatherer.clone().spawn_gather_thread(n)?;
-            Ok(())
-        })?;
-
-        debug!("created gatherer");
-        Ok((gatherer, receiver))
+    /// Creates a gatherer builder used to configure the gatherer. Uses conservative defaults,
+    /// 16 threads and 64k backlog.
+    #[must_use = "configure the Gatherer and finally call .start()"]
+    pub fn build() -> GathererBuilder {
+        GathererBuilder::new()
     }
 
     /// Adds a directory to the processing queue of the inventory. This is the main function
@@ -194,6 +166,82 @@ impl Gatherer {
     }
 }
 
+pub struct GathererBuilder {
+    num_gather_threads: usize,
+    inventory_backlog:  usize,
+}
+
+impl Default for GathererBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl GathererBuilder {
+    fn new() -> Self {
+        GathererBuilder {
+            num_gather_threads: 16,
+            inventory_backlog:  0,
+        }
+    }
+
+    /// Starts the Gatherer. Takes the user defined processing function as argument. This
+    /// function is used to process every directory entry seen. It should be small and fast
+    /// selecting which sub directories to be traversed and which entries to pass to the
+    /// output queue. Any more work should be done on the output then. Returns a Result tuple
+    /// with an Arc<Gatherer> and the receiving end of the output queue.
+    pub fn start(
+        &self,
+        processor: &'static ProcessFn,
+    ) -> io::Result<(Arc<Gatherer>, Receiver<InventoryEntryMessage>)> {
+        let (inventory_send_queue, receiver) = bounded(
+            // when inventory backlog is not set, set it automatically to 4k per thread
+            if self.inventory_backlog == 0 {
+                4096 * self.num_gather_threads
+            } else {
+                self.inventory_backlog
+            },
+        );
+
+        let gatherer = Arc::new(Gatherer {
+            names: InternedNames::new(),
+            dirs_queue: PriorityQueue::new(),
+            inventory_send_queue,
+            processor,
+        });
+
+        (0..self.num_gather_threads).try_for_each(|n| -> io::Result<()> {
+            gatherer.clone().spawn_gather_thread(n)?;
+            Ok(())
+        })?;
+
+        debug!("created gatherer");
+        Ok((gatherer, receiver))
+    }
+
+    /// Sets the number of threads which traverse the directories. These are IO-bound
+    /// operations and the more threads are used the better are the opportunities for the
+    /// kernel to optimize IO-Requests. Tests have shown that on fast SSD's and cached data
+    /// thread numbers in the hundrededs still show some benefits (at high resource
+    /// costs). For general operation and on slower HDD's / non cached data 8-64 threads
+    /// should be good enough. Default is 16 threads.
+    pub fn with_gather_threads(mut self, num_threads: usize) -> Self {
+        assert!(num_threads > 0, "Must at least use one thread");
+        self.num_gather_threads = num_threads;
+        self
+    }
+
+    /// Sets the amount of messages
+    /// the  output queue can hold. For cached and readahead data, the kernel can send
+    /// bursts entries to the gatherer threads at very high speeds, since we don't want to
+    /// stall the gathering, the is adds some output buffering. Usually values from 64k to
+    /// 512k should be fine here. When zero (the default) 4k per thread are used.
+    pub fn with_inventory_backlog(mut self, backlog_size: usize) -> Self {
+        self.inventory_backlog = backlog_size;
+        self
+    }
+}
+
 // Defines the API the user defined processor function may use to send data back on the
 // queues.
 pub struct GathererHandle<'a>(&'a Gatherer);
@@ -259,11 +307,13 @@ mod test {
     #[test]
     fn smoke() {
         crate::test::init_env_logging();
-        let _ = Gatherer::new(1, 65536, &|_gatherer: GathererHandle,
-                                          _entry: openat::Entry,
-                                          _parent_path: Arc<ObjectPath>,
-                                          _parent_dir: Arc<openat::Dir>|
-         -> DynResult<()> { Ok(()) });
+        let _ = Gatherer::build()
+            .with_gather_threads(1)
+            .start(&|_gatherer: GathererHandle,
+                     _entry: openat::Entry,
+                     _parent_path: Arc<ObjectPath>,
+                     _parent_dir: Arc<openat::Dir>|
+             -> DynResult<()> { Ok(()) });
     }
 
     #[test]
@@ -271,23 +321,26 @@ mod test {
     fn load_dir() {
         crate::test::init_env_logging();
 
-        let (inventory, receiver) = Gatherer::new(24, 524288, &|gatherer: GathererHandle,
-                                                                entry: openat::Entry,
-                                                                parent_path: Arc<ObjectPath>,
-                                                                parent_dir: Arc<openat::Dir>|
-         -> DynResult<()> {
-            match entry.simple_type() {
-                Some(openat::SimpleType::Dir) => {
-                    gatherer.traverse_dir(&entry, parent_path.clone(), parent_dir.clone());
-                    gatherer.output_entry(&entry, parent_path);
+        let (inventory, receiver) = Gatherer::build()
+            .with_gather_threads(24)
+            .with_inventory_backlog(524288)
+            .start(&|gatherer: GathererHandle,
+                     entry: openat::Entry,
+                     parent_path: Arc<ObjectPath>,
+                     parent_dir: Arc<openat::Dir>|
+             -> DynResult<()> {
+                match entry.simple_type() {
+                    Some(openat::SimpleType::Dir) => {
+                        gatherer.traverse_dir(&entry, parent_path.clone(), parent_dir.clone());
+                        gatherer.output_entry(&entry, parent_path);
+                    }
+                    _ => {
+                        gatherer.output_entry(&entry, parent_path);
+                    }
                 }
-                _ => {
-                    gatherer.output_entry(&entry, parent_path);
-                }
-            }
-            Ok(())
-        })
-        .unwrap();
+                Ok(())
+            })
+            .unwrap();
         inventory.load_dir_recursive(ObjectPath::new("."));
 
         let mut stdout = std::io::stdout();
@@ -309,22 +362,23 @@ mod test {
     fn entry_messages() {
         crate::test::init_env_logging();
 
-        let (inventory, receiver) = Gatherer::new(24, 524288, &|gatherer: GathererHandle,
-                                                                entry: openat::Entry,
-                                                                parent_path: Arc<ObjectPath>,
-                                                                parent_dir: Arc<openat::Dir>|
-         -> DynResult<()> {
-            match entry.simple_type() {
-                Some(openat::SimpleType::Dir) => {
-                    gatherer.traverse_dir(&entry, parent_path.clone(), parent_dir.clone());
+        let (inventory, receiver) = Gatherer::build()
+            .start(&|gatherer: GathererHandle,
+                     entry: openat::Entry,
+                     parent_path: Arc<ObjectPath>,
+                     parent_dir: Arc<openat::Dir>|
+             -> DynResult<()> {
+                match entry.simple_type() {
+                    Some(openat::SimpleType::Dir) => {
+                        gatherer.traverse_dir(&entry, parent_path.clone(), parent_dir.clone());
+                    }
+                    _ => {
+                        gatherer.output_entry(&entry, parent_path);
+                    }
                 }
-                _ => {
-                    gatherer.output_entry(&entry, parent_path);
-                }
-            }
-            Ok(())
-        })
-        .unwrap();
+                Ok(())
+            })
+            .unwrap();
         inventory.load_dir_recursive(ObjectPath::new("src"));
 
         let mut stdout = std::io::stdout();
@@ -344,22 +398,23 @@ mod test {
     fn metadata_messages() {
         crate::test::init_env_logging();
 
-        let (inventory, receiver) = Gatherer::new(24, 524288, &|gatherer: GathererHandle,
-                                                                entry: openat::Entry,
-                                                                parent_path: Arc<ObjectPath>,
-                                                                parent_dir: Arc<openat::Dir>|
-         -> DynResult<()> {
-            match entry.simple_type() {
-                Some(openat::SimpleType::Dir) => {
-                    Ok(gatherer.traverse_dir(&entry, parent_path.clone(), parent_dir.clone()))
+        let (inventory, receiver) = Gatherer::build()
+            .start(&|gatherer: GathererHandle,
+                     entry: openat::Entry,
+                     parent_path: Arc<ObjectPath>,
+                     parent_dir: Arc<openat::Dir>|
+             -> DynResult<()> {
+                match entry.simple_type() {
+                    Some(openat::SimpleType::Dir) => {
+                        Ok(gatherer.traverse_dir(&entry, parent_path.clone(), parent_dir.clone()))
+                    }
+                    _ => match parent_dir.metadata(entry.file_name()) {
+                        Ok(metadata) => Ok(gatherer.output_metadata(&entry, parent_path, metadata)),
+                        Err(e) => Err(Box::new(e)),
+                    },
                 }
-                _ => match parent_dir.metadata(entry.file_name()) {
-                    Ok(metadata) => Ok(gatherer.output_metadata(&entry, parent_path, metadata)),
-                    Err(e) => Err(Box::new(e)),
-                },
-            }
-        })
-        .unwrap();
+            })
+            .unwrap();
         inventory.load_dir_recursive(ObjectPath::new("src"));
 
         let mut stdout = std::io::stdout();
