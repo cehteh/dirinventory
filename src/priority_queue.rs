@@ -9,10 +9,10 @@
 //             becomes available merge the local data with the main queue with
 //             'try_merge_send()'.
 //!
-use std::sync::{Condvar, Mutex, TryLockError};
 use std::collections::BinaryHeap;
 use std::sync::atomic::{self, AtomicBool, AtomicUsize};
 
+use parking_lot::{Condvar, Mutex};
 #[allow(unused_imports)]
 pub use log::{debug, error, info, trace, warn};
 
@@ -58,10 +58,7 @@ where
     pub fn send(&self, entry: K, prio: P) {
         self.in_progress.fetch_add(1, atomic::Ordering::SeqCst);
         self.is_drained.store(false, atomic::Ordering::SeqCst);
-        self.heap
-            .lock()
-            .expect("Mutex not poisoned")
-            .push(QueueEntry::Entry(entry, prio));
+        self.heap.lock().push(QueueEntry::Entry(entry, prio));
         self.notify.notify_one();
     }
 
@@ -78,24 +75,19 @@ where
             .is_ok()
         {
             self.in_progress.fetch_add(1, atomic::Ordering::SeqCst);
-            self.heap
-                .lock()
-                .expect("Mutex not poisoned")
-                .push(QueueEntry::Drained);
+            self.heap.lock().push(QueueEntry::Drained);
             self.notify.notify_one();
         }
     }
 
     /// Returns the smallest entry from a queue. This entry is wraped in a ReceiveGuard/QueueEntry
     pub fn recv(&self) -> ReceiveGuard<K, P> {
-        let entry = self
-            .notify
-            .wait_while(self.heap.lock().expect("Mutex not poisoned"), |heap| {
-                heap.is_empty()
-            })
-            .expect("Mutex not poisoned")
-            .pop()
-            .unwrap();
+        let mut lock = self.heap.lock();
+        while lock.is_empty() {
+            self.notify.wait(&mut lock);
+        }
+
+        let entry = lock.pop().unwrap();
 
         ReceiveGuard::new(entry, self)
     }
@@ -103,9 +95,8 @@ where
     /// Try to get the smallest entry from a queue. Will return Some<ReceiveGuard> when an entry is available.
     pub fn try_recv(&self) -> Option<ReceiveGuard<K, P>> {
         match self.heap.try_lock() {
-            Ok(mut heap) => heap.pop().map(|entry| ReceiveGuard::new(entry, self)),
-            Err(TryLockError::WouldBlock) => None,
-            _ => panic!("Poisoned Mutex"),
+            Some(mut heap) => heap.pop().map(|entry| ReceiveGuard::new(entry, self)),
+            None => None,
         }
     }
 }
