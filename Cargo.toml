@@ -3,7 +3,7 @@ name = "dirinventory"
 description = "Very fast multithreaded directory traversal"
 readme = "README.md"
 license = "MIT OR Apache-2.0"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["Christian Thäter <ct@pipapo.org>"]
 repository = "https://github.com/cehteh/dirinventory.git"
 keywords = ["filesystem", "fs", "unix"]
@@ -14,9 +14,9 @@ edition = "2021"
 [dependencies]
 openat_ct = "0.2.0-pre4"
 log = "0.4"
-easy-error = "1.0.0"
 crossbeam-channel = "0.5"
 parking_lot = "0.11.2"
+libc = "0.2"
 
 [dev-dependencies]
 env_logger = "0.9"

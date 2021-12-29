@@ -20,7 +20,13 @@ pub use internednames::{InternedName, InternedNames};
 mod priority_queue;
 pub use priority_queue::{PriorityQueue, QueueEntry, ReceiveGuard};
 pub use openat_ct as openat;
-pub use easy_error::{Error, ResultExt};
+
+/// An user defined processing function can return any kind of error, this needs to be boxed
+/// and dyn. Since error handling is expected to be the slow path, having the allocation and
+/// vtable here shouldn't be an performance issue.
+pub type DynError = Box<dyn std::error::Error + Send>;
+/// Typedef for the DynError result.
+pub type DynResult<T> = std::result::Result<T, DynError>;
 
 #[cfg(test)]
 mod test {

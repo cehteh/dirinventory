@@ -1,10 +1,7 @@
 use std::sync::Arc;
 use std::fmt::{Debug, Formatter, Result};
 
-use crate::openat;
-use crate::ObjectPath;
-use crate::Error;
-use crate::openat::{metadata_types::ino_t, SimpleType};
+use crate::*;
 
 /// Messages on the input queue, directories to be processed.
 #[derive(Debug)]
@@ -47,11 +44,15 @@ impl DirectoryGatherMessage {
 //#[derive(Debug)] FIXME: openat::Metadata is not Debug
 pub enum InventoryEntryMessage {
     /// Passes the path and lightweight data from an openat::Entry, no stat() calls are needed.
-    Entry(Arc<ObjectPath>, Option<SimpleType>, ino_t),
+    Entry(
+        Arc<ObjectPath>,
+        Option<openat::SimpleType>,
+        openat::metadata_types::ino_t,
+    ),
     /// Passes the path and openat::Metadata. The user has to crete the metadata which may involve costly stat() calls.
     Metadata(Arc<ObjectPath>, openat::Metadata),
     /// The Gaterers only pass errors up but try to continue.
-    Err(Error),
+    Err(DynError),
     /// Message when the input queues got empty and no gathering thread still processes any data.
     Done,
     //    Shutdown
@@ -78,5 +79,10 @@ impl InventoryEntryMessage {
             Metadata(path, _) => Some(path),
             _ => None,
         }
+    }
+
+    /// Returns true when this message is an error message.
+    pub fn is_error(&self) -> bool {
+        matches!(self, InventoryEntryMessage::Err(_))
     }
 }

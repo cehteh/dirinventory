@@ -14,7 +14,7 @@ use crate::*;
 // which defines the API for pushing things back on the Gatherers queues, the raw
 // openat::Entry to be processed, an object to the path of the parent directory and the openat::Dir
 // handle of the parent dir.
-type ProcessFn = dyn Fn(GathererHandle, openat::Entry, Arc<ObjectPath>, Arc<openat::Dir>) -> Result<(), Error>
+type ProcessFn = dyn Fn(GathererHandle, openat::Entry, Arc<ObjectPath>, Arc<openat::Dir>) -> DynResult<()>
     + Send
     + Sync;
 
@@ -99,7 +99,7 @@ impl Gatherer {
     }
 
     /// sends error to output channel and returns it
-    fn send_error<T>(&self, err: Error) {
+    fn send_error<T>(&self, err: DynError) {
         warn!("{:?}", err);
         self.send_entry(InventoryEntryMessage::Err(err));
     }
@@ -111,10 +111,16 @@ impl Gatherer {
         entry: io::Result<openat::Entry>,
         parent_path: Arc<ObjectPath>,
         parent_dir: Arc<openat::Dir>,
-    ) -> Result<(), Error> {
-        let entry = entry.context("Invalid directory entry")?;
-        (self.processor)(GathererHandle(self), entry, parent_path, parent_dir)?;
-        Ok(())
+    ) -> DynResult<()> {
+        match entry {
+            Ok(entry) => (self.processor)(GathererHandle(self), entry, parent_path, parent_dir),
+            Err(e) => Err(Box::new(e)),
+        }
+    }
+
+    fn resend_dir(&self, message: DirectoryGatherMessage, prio: u64) {
+        self.send_dir(message, prio);
+        thread::sleep(std::time::Duration::from_millis(5));
     }
 
     /// Spawns a single gatherer thread
@@ -126,15 +132,9 @@ impl Gatherer {
                     use DirectoryGatherMessage::*;
 
                     // TODO: messages for dir enter/leave on the ouput queue
-                    // FIXME: when iterating at a certain depth (before number of file handles running
-                    // out) then dont keep sub dir handles open in an Arc, needs a different strategy
-                    // then. (break parent Dir, start with a fresh Dir handle)
                     match self.dirs_queue.recv().entry() {
-                        QueueEntry::Entry(TraverseDirectory { path, parent_dir }, _prio) => {
-                            match &parent_dir {
-                                // TODO: when out of file handles then reinsert into queue and
-                                // sleep this thread for 50ms (or find a better way to notify
-                                // when to continue)
+                        QueueEntry::Entry(TraverseDirectory { path, parent_dir }, prio) => {
+                            match parent_dir {
                                 Some(dir) => dir.sub_dir(path.name()),
                                 None => openat::Dir::open(&path.to_pathbuf()),
                             }
@@ -150,26 +150,37 @@ impl Gatherer {
                                     .map(|dir_iter| {
                                         dir_iter.for_each(|entry| {
                                             self.process_entry(entry, path.clone(), dir.clone())
-                                                .context("Could not process entry")
                                                 .map_err(|e| self.send_error::<()>(e))
                                                 .ok();
                                         })
                                     })
-                                    .map_err(|err| {
-                                        warn!("{:?}: {:?}", *dir, err);
-                                        err
+                                    .map_err(|e| {
+                                        if e.raw_os_error() == Some(libc::EMFILE) {
+                                            self.resend_dir(
+                                                TraverseDirectory {
+                                                    path:       path.clone(),
+                                                    parent_dir: parent_dir.clone(),
+                                                },
+                                                *prio,
+                                            );
+                                        } else {
+                                            self.send_error::<()>(Box::new(e))
+                                        }
                                     })
-                                    .with_context(|| {
-                                        format!(
-                                            "{:?}: Could not iterate {:?}",
-                                            *dir,
-                                            path.to_pathbuf()
-                                        )
-                                    })
-                                    .map_err(|e| self.send_error::<()>(e))
                             })
-                            .with_context(|| format!("Could not open: {:?}", path.to_pathbuf()))
-                            .map_err(|e| self.send_error::<()>(e))
+                            .map_err(|e| {
+                                if e.raw_os_error() == Some(libc::EMFILE) {
+                                    self.resend_dir(
+                                        TraverseDirectory {
+                                            path:       path.clone(),
+                                            parent_dir: parent_dir.clone(),
+                                        },
+                                        *prio,
+                                    );
+                                } else {
+                                    self.send_error::<()>(Box::new(e))
+                                }
+                            })
                             .ok();
                         }
                         QueueEntry::Drained => {
@@ -252,7 +263,7 @@ mod test {
                                           _entry: openat::Entry,
                                           _parent_path: Arc<ObjectPath>,
                                           _parent_dir: Arc<openat::Dir>|
-         -> Result<(), Error> { Ok(()) });
+         -> DynResult<()> { Ok(()) });
     }
 
     #[test]
@@ -264,7 +275,7 @@ mod test {
                                                                 entry: openat::Entry,
                                                                 parent_path: Arc<ObjectPath>,
                                                                 parent_dir: Arc<openat::Dir>|
-         -> Result<(), Error> {
+         -> DynResult<()> {
             match entry.simple_type() {
                 Some(openat::SimpleType::Dir) => {
                     gatherer.traverse_dir(&entry, parent_path.clone(), parent_dir.clone());
@@ -288,6 +299,8 @@ mod test {
                 if let Some(path) = msg.path() {
                     let _ = stdout.write_all(path.to_pathbuf().as_os_str().as_bytes());
                     let _ = stdout.write_all(b"\n");
+                } else if msg.is_error() {
+                    error!("{:?}", msg)
                 }
             });
     }
@@ -300,7 +313,7 @@ mod test {
                                                                 entry: openat::Entry,
                                                                 parent_path: Arc<ObjectPath>,
                                                                 parent_dir: Arc<openat::Dir>|
-         -> Result<(), Error> {
+         -> DynResult<()> {
             match entry.simple_type() {
                 Some(openat::SimpleType::Dir) => {
                     gatherer.traverse_dir(&entry, parent_path.clone(), parent_dir.clone());
@@ -335,22 +348,16 @@ mod test {
                                                                 entry: openat::Entry,
                                                                 parent_path: Arc<ObjectPath>,
                                                                 parent_dir: Arc<openat::Dir>|
-         -> Result<(), Error> {
+         -> DynResult<()> {
             match entry.simple_type() {
                 Some(openat::SimpleType::Dir) => {
-                    gatherer.traverse_dir(&entry, parent_path.clone(), parent_dir.clone());
+                    Ok(gatherer.traverse_dir(&entry, parent_path.clone(), parent_dir.clone()))
                 }
-                _ => {
-                    gatherer.output_metadata(
-                        &entry,
-                        parent_path,
-                        parent_dir
-                            .metadata(entry.file_name())
-                            .context("failed to create metadata")?,
-                    );
-                }
+                _ => match parent_dir.metadata(entry.file_name()) {
+                    Ok(metadata) => Ok(gatherer.output_metadata(&entry, parent_path, metadata)),
+                    Err(e) => Err(Box::new(e)),
+                },
             }
-            Ok(())
         })
         .unwrap();
         inventory.load_dir_recursive(ObjectPath::new("src"));
