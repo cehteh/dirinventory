@@ -5,10 +5,6 @@
 //!    receiver is processing entrys, others 'recv()' are blocking. Once the queue becomes
 //!    empty and the final entry is processed one waiter will get a notification with a
 //!    'Drained' message.
-// PLANNED: * Use without contention by pushing entrys to a local VecDeque and once the lock
-//             becomes available merge the local data with the main queue with
-//             'try_merge_send()'.
-//!
 use std::collections::BinaryHeap;
 use std::sync::atomic::{self, AtomicBool, AtomicUsize};
 
@@ -39,6 +35,12 @@ where
     }
 }
 
+enum Notify {
+    None,
+    One,
+    All,
+}
+
 impl<K, P> PriorityQueue<K, P>
 where
     K: Send,
@@ -54,12 +56,67 @@ where
         }
     }
 
+    /// Inserts all elements from the stash to the PriorityQueue, emties stash.
+    pub fn sync(&self, stash: &mut Stash<K, P>) {
+        let mut notify = Notify::None;
+
+        if !stash.0.is_empty() {
+            if stash.0.len() == 1 {
+                notify = Notify::One;
+            } else {
+                notify = Notify::All;
+            }
+
+            let mut lock = self.heap.lock();
+            stash.0.drain(..).for_each(|e| {
+                lock.push(e);
+            });
+        }
+
+        match notify {
+            Notify::None => {}
+            Notify::One => {
+                self.notify.notify_one();
+            }
+            Notify::All => {
+                self.notify.notify_all();
+            }
+        }
+    }
+
+    fn send_msg(&self, entry: QueueEntry<K, P>, stash: &mut Stash<K, P>) {
+        let mut notify = Notify::None;
+
+        if let Some(mut lock) = self.heap.try_lock() {
+            if stash.0.is_empty() {
+                notify = Notify::One;
+            } else {
+                notify = Notify::All;
+                stash.0.drain(..).for_each(|e| {
+                    lock.push(e);
+                });
+            }
+            lock.push(entry);
+        } else {
+            stash.0.push(entry);
+        }
+
+        match notify {
+            Notify::None => {}
+            Notify::One => {
+                self.notify.notify_one();
+            }
+            Notify::All => {
+                self.notify.notify_all();
+            }
+        }
+    }
+
     /// Pushes an entry with some prio onto the queue.
-    pub fn send(&self, entry: K, prio: P) {
+    pub fn send(&self, entry: K, prio: P, stash: &mut Stash<K, P>) {
         self.in_progress.fetch_add(1, atomic::Ordering::SeqCst);
         self.is_drained.store(false, atomic::Ordering::SeqCst);
-        self.heap.lock().push(QueueEntry::Entry(entry, prio));
-        self.notify.notify_one();
+        self.send_msg(QueueEntry::Entry(entry, prio), stash);
     }
 
     /// Send the 'Drained' message
@@ -217,21 +274,52 @@ where
     }
 }
 
+/// For (mostly) contentions free queue insertion every thread maintains a private
+/// 'stash'. When messages are send to the PriorityQueue while it is locked they are stored in
+/// this stash. Once the lock is obtained the stashed messages will be moved to the
+/// PriorityQueue. This can also be enforced with the 'PriorityQueue::sync()' function.
+pub struct Stash<K, P>(Vec<QueueEntry<K, P>>)
+where
+    K: Send,
+    P: PartialOrd + Default + Ord;
+
+impl<K, P> Stash<K, P>
+where
+    K: Send,
+    P: PartialOrd + Default + Ord,
+{
+    /// Creates a new stash.
+    pub fn new() -> Self {
+        Stash(Vec::new())
+    }
+}
+
+impl<K, P> Default for Stash<K, P>
+where
+    K: Send,
+    P: PartialOrd + Default + Ord,
+{
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::thread;
     use std::sync::Arc;
 
-    use super::{PriorityQueue, QueueEntry};
+    use super::{PriorityQueue, QueueEntry, Stash};
     use crate::test;
 
     #[test]
     fn smoke() {
         test::init_env_logging();
         let queue: PriorityQueue<String, u64> = PriorityQueue::new();
-        queue.send("test 1".to_string(), 1);
-        queue.send("test 3".to_string(), 3);
-        queue.send("test 2".to_string(), 2);
+        let mut stash = Stash::<String, u64>::new();
+        queue.send("test 1".to_string(), 1, &mut stash);
+        queue.send("test 3".to_string(), 3, &mut stash);
+        queue.send("test 2".to_string(), 2, &mut stash);
         assert_eq!(
             queue.recv().entry(),
             &QueueEntry::Entry("test 1".to_string(), 1)
@@ -252,9 +340,10 @@ mod tests {
     fn try_recv() {
         test::init_env_logging();
         let queue: PriorityQueue<String, u64> = PriorityQueue::new();
-        queue.send("test 1".to_string(), 1);
-        queue.send("test 3".to_string(), 3);
-        queue.send("test 2".to_string(), 2);
+        let mut stash = Stash::<String, u64>::new();
+        queue.send("test 1".to_string(), 1, &mut stash);
+        queue.send("test 3".to_string(), 3, &mut stash);
+        queue.send("test 2".to_string(), 2, &mut stash);
         assert!(queue.try_recv().is_some());
         assert!(queue.try_recv().is_some());
         assert!(queue.try_recv().is_some());
@@ -269,14 +358,16 @@ mod tests {
         let queue: Arc<PriorityQueue<String, u64>> = Arc::new(PriorityQueue::new());
 
         let thread1_queue = queue.clone();
+        let mut stash1 = Stash::<String, u64>::new();
         let thread1 = thread::spawn(move || {
-            thread1_queue.send("test 1".to_string(), 1);
-            thread1_queue.send("test 3".to_string(), 3);
-            thread1_queue.send("test 2".to_string(), 2);
+            thread1_queue.send("test 1".to_string(), 1, &mut stash1);
+            thread1_queue.send("test 3".to_string(), 3, &mut stash1);
+            thread1_queue.send("test 2".to_string(), 2, &mut stash1);
         });
         thread1.join().unwrap();
 
         let thread2_queue = queue.clone();
+        let mut stash2 = Stash::<String, u64>::new();
         let thread2 = thread::spawn(move || {
             assert_eq!(
                 thread2_queue.recv().entry(),
@@ -292,7 +383,7 @@ mod tests {
             );
             assert!(thread2_queue.recv().entry().is_drained());
             assert!(thread2_queue.try_recv().is_none());
-            thread2_queue.send("test 4".to_string(), 4);
+            thread2_queue.send("test 4".to_string(), 4, &mut stash2);
             assert_eq!(
                 thread2_queue.recv().entry(),
                 &QueueEntry::Entry("test 4".to_string(), 4)

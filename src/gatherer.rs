@@ -3,10 +3,12 @@
 use std::io;
 use std::sync::Arc;
 use std::thread;
+use std::ops::DerefMut;
 
 use crossbeam_channel::{bounded, Receiver, Sender};
 #[allow(unused_imports)]
 pub use log::{debug, error, info, trace, warn};
+use parking_lot::Mutex;
 
 use crate::*;
 
@@ -17,6 +19,8 @@ use crate::*;
 type ProcessFn = dyn Fn(GathererHandle, openat::Entry, Arc<ObjectPath>, Arc<openat::Dir>) -> DynResult<()>
     + Send
     + Sync;
+
+type GathererStash = Stash<DirectoryGatherMessage, u64>;
 
 /// Create a space efficient store for file metadata of files larger than a certain
 /// min_blocksize.  This is used to find whcih files to delete first for most space efficient
@@ -34,6 +38,10 @@ pub struct Gatherer {
     dirs_queue:           PriorityQueue<DirectoryGatherMessage, u64>,
     /// The output queue where the results are send to.
     inventory_send_queue: Sender<InventoryEntryMessage>,
+
+    /// Sending an initial directory requires an stash.
+    // PLANNED: Also used when one wants to push multiple directories.
+    kickoff_stash: Mutex<GathererStash>,
 }
 
 impl Gatherer {
@@ -47,19 +55,22 @@ impl Gatherer {
     /// Adds a directory to the processing queue of the inventory. This is the main function
     /// to initiate a directory traversal.
     pub fn load_dir_recursive(&self, path: Arc<ObjectPath>) {
+        let mut stash = self.kickoff_stash.lock();
         self.send_dir(
             DirectoryGatherMessage::new_dir(path),
             u64::MAX, /* initial message priority instead depth/inode calculation, added
                        * directories are processed at the lowest priority */
+            stash.deref_mut(),
         );
+        self.dirs_queue.sync(stash.deref_mut());
     }
 
     // TODO: fn shutdown, there is currently no way to free a Gatherer as the threads keep it alive
 
     /// put a message on the input queue.
     #[inline(always)]
-    fn send_dir(&self, message: DirectoryGatherMessage, prio: u64) {
-        self.dirs_queue.send(message, prio);
+    fn send_dir(&self, message: DirectoryGatherMessage, prio: u64, stash: &mut GathererStash) {
+        self.dirs_queue.send(message, prio, stash);
     }
 
     /// put a message on the output queue.
@@ -83,15 +94,25 @@ impl Gatherer {
         entry: io::Result<openat::Entry>,
         parent_path: Arc<ObjectPath>,
         parent_dir: Arc<openat::Dir>,
+        stash: &mut GathererStash,
     ) -> DynResult<()> {
         match entry {
-            Ok(entry) => (self.processor)(GathererHandle(self), entry, parent_path, parent_dir),
+            Ok(entry) => (self.processor)(
+                GathererHandle {
+                    gatherer: self,
+                    stash,
+                },
+                entry,
+                parent_path,
+                parent_dir,
+            ),
             Err(e) => Err(Box::new(e)),
         }
     }
 
-    fn resend_dir(&self, message: DirectoryGatherMessage, prio: u64) {
-        self.send_dir(message, prio);
+    fn resend_dir(&self, message: DirectoryGatherMessage, prio: u64, stash: &mut GathererStash) {
+        self.send_dir(message, prio, stash);
+        warn!("filehandles exhausted");
         thread::sleep(std::time::Duration::from_millis(5));
     }
 
@@ -100,6 +121,7 @@ impl Gatherer {
         thread::Builder::new()
             .name(format!("dir/gather/{}", n))
             .spawn(move || {
+                let mut stash: GathererStash = Stash::new();
                 loop {
                     use DirectoryGatherMessage::*;
 
@@ -121,10 +143,16 @@ impl Gatherer {
                                 dir.list_self()
                                     .map(|dir_iter| {
                                         dir_iter.for_each(|entry| {
-                                            self.process_entry(entry, path.clone(), dir.clone())
-                                                .map_err(|e| self.send_error::<()>(e))
-                                                .ok();
-                                        })
+                                            self.process_entry(
+                                                entry,
+                                                path.clone(),
+                                                dir.clone(),
+                                                &mut stash,
+                                            )
+                                            .map_err(|e| self.send_error::<()>(e))
+                                            .ok();
+                                        });
+                                        self.dirs_queue.sync(&mut stash);
                                     })
                                     .map_err(|e| {
                                         if e.raw_os_error() == Some(libc::EMFILE) {
@@ -134,6 +162,7 @@ impl Gatherer {
                                                     parent_dir: parent_dir.clone(),
                                                 },
                                                 *prio,
+                                                &mut stash,
                                             );
                                         } else {
                                             self.send_error::<()>(Box::new(e))
@@ -148,6 +177,7 @@ impl Gatherer {
                                             parent_dir: parent_dir.clone(),
                                         },
                                         *prio,
+                                        &mut stash,
                                     );
                                 } else {
                                     self.send_error::<()>(Box::new(e))
@@ -208,6 +238,7 @@ impl GathererBuilder {
             dirs_queue: PriorityQueue::new(),
             inventory_send_queue,
             processor,
+            kickoff_stash: Mutex::new(GathererStash::new()),
         });
 
         (0..self.num_gather_threads).try_for_each(|n| -> io::Result<()> {
@@ -244,17 +275,23 @@ impl GathererBuilder {
 
 // Defines the API the user defined processor function may use to send data back on the
 // queues.
-pub struct GathererHandle<'a>(&'a Gatherer);
+pub struct GathererHandle<'a> {
+    gatherer: &'a Gatherer,
+    stash:    &'a mut GathererStash,
+}
 
 impl GathererHandle<'_> {
     /// Add a sub directory to the input priority queue to be traversed as well.
     pub fn traverse_dir(
-        &self,
+        &mut self,
         entry: &openat::Entry,
         parent_path: Arc<ObjectPath>,
         parent_dir: Arc<openat::Dir>,
     ) {
-        let subdir = ObjectPath::subobject(parent_path, self.0.names.interning(entry.file_name()));
+        let subdir = ObjectPath::subobject(
+            parent_path,
+            self.gatherer.names.interning(entry.file_name()),
+        );
 
         // The Order of directory traversal is defined by the 64bit priority in the
         // PriorityQueue. This 64bit are composed of the inode number added directory
@@ -264,15 +301,20 @@ impl GathererHandle<'_> {
         let dir_prio = ((u16::MAX - subdir.depth()) as u64) << 48;
         let message = DirectoryGatherMessage::new_dir(subdir);
 
-        self.0
-            .send_dir(message.with_parent(parent_dir), dir_prio + entry.inode());
+        self.gatherer.send_dir(
+            message.with_parent(parent_dir),
+            dir_prio + entry.inode(),
+            self.stash,
+        );
     }
 
     /// Sends openat::Entry components to the output queue
     pub fn output_entry(&self, entry: &openat::Entry, parent_path: Arc<ObjectPath>) {
-        let entryname =
-            ObjectPath::subobject(parent_path, self.0.names.interning(entry.file_name()));
-        self.0.send_entry(InventoryEntryMessage::Entry(
+        let entryname = ObjectPath::subobject(
+            parent_path,
+            self.gatherer.names.interning(entry.file_name()),
+        );
+        self.gatherer.send_entry(InventoryEntryMessage::Entry(
             entryname,
             entry.simple_type(),
             entry.inode(),
@@ -286,9 +328,11 @@ impl GathererHandle<'_> {
         parent_path: Arc<ObjectPath>,
         metadata: openat::Metadata,
     ) {
-        let entryname =
-            ObjectPath::subobject(parent_path, self.0.names.interning(entry.file_name()));
-        self.0
+        let entryname = ObjectPath::subobject(
+            parent_path,
+            self.gatherer.names.interning(entry.file_name()),
+        );
+        self.gatherer
             .send_entry(InventoryEntryMessage::Metadata(entryname, metadata));
     }
 }
@@ -322,9 +366,8 @@ mod test {
         crate::test::init_env_logging();
 
         let (inventory, receiver) = Gatherer::build()
-            .with_gather_threads(24)
-            .with_inventory_backlog(524288)
-            .start(&|gatherer: GathererHandle,
+            .with_gather_threads(64)
+            .start(&|mut gatherer: GathererHandle,
                      entry: openat::Entry,
                      parent_path: Arc<ObjectPath>,
                      parent_dir: Arc<openat::Dir>|
@@ -363,7 +406,7 @@ mod test {
         crate::test::init_env_logging();
 
         let (inventory, receiver) = Gatherer::build()
-            .start(&|gatherer: GathererHandle,
+            .start(&|mut gatherer: GathererHandle,
                      entry: openat::Entry,
                      parent_path: Arc<ObjectPath>,
                      parent_dir: Arc<openat::Dir>|
@@ -399,7 +442,7 @@ mod test {
         crate::test::init_env_logging();
 
         let (inventory, receiver) = Gatherer::build()
-            .start(&|gatherer: GathererHandle,
+            .start(&|mut gatherer: GathererHandle,
                      entry: openat::Entry,
                      parent_path: Arc<ObjectPath>,
                      parent_dir: Arc<openat::Dir>|
