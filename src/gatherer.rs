@@ -211,6 +211,7 @@ impl Gatherer {
     }
 }
 
+/// Configures a Gatherer
 pub struct GathererBuilder {
     num_gather_threads: usize,
     inventory_backlog:  usize,
