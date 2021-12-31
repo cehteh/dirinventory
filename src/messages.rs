@@ -12,7 +12,7 @@ pub enum DirectoryGatherMessage {
         /// The path to the Object
         path:       Arc<ObjectPath>,
         /// Optional handle to the parent directory
-        parent_dir: Option<Arc<openat::Dir>>,
+        parent_dir: Option<Arc<Dir>>,
     },
     // internally used by drop to terminate all threads
     // Shutdown,
@@ -29,7 +29,7 @@ impl DirectoryGatherMessage {
 
     /// Attach a parent handle to a 'TraverseDirectory' message. Must not be used with other messages!
     #[must_use]
-    pub fn with_parent(mut self, parent: Arc<openat::Dir>) -> Self {
+    pub fn with_parent(mut self, parent: Arc<Dir>) -> Self {
         debug_assert!(matches!(
             self,
             DirectoryGatherMessage::TraverseDirectory { .. }

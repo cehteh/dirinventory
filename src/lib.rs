@@ -19,6 +19,9 @@ pub use internednames::{InternedName, InternedNames};
 
 mod priority_queue;
 pub use priority_queue::{PriorityQueue, QueueEntry, ReceiveGuard, Stash};
+
+mod dirhandle;
+pub use dirhandle::{used_handles, Dir};
 pub use openat_ct as openat;
 
 /// An user defined processing function can return any kind of error, this needs to be boxed

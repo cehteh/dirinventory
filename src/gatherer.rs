@@ -14,11 +14,10 @@ use crate::*;
 
 // The type of the user supplied closure/function to process entries.  Takes a GathererHandle
 // which defines the API for pushing things back on the Gatherers queues, the raw
-// openat::Entry to be processed, an object to the path of the parent directory and the openat::Dir
+// openat::Entry to be processed, an object to the path of the parent directory and the Dir
 // handle of the parent dir.
-type ProcessFn = dyn Fn(GathererHandle, openat::Entry, Arc<ObjectPath>, Arc<openat::Dir>) -> DynResult<()>
-    + Send
-    + Sync;
+type ProcessFn =
+    dyn Fn(GathererHandle, openat::Entry, Arc<ObjectPath>, Arc<Dir>) -> DynResult<()> + Send + Sync;
 
 type GathererStash = Stash<DirectoryGatherMessage, u64>;
 
@@ -93,7 +92,7 @@ impl Gatherer {
         &self,
         entry: io::Result<openat::Entry>,
         parent_path: Arc<ObjectPath>,
-        parent_dir: Arc<openat::Dir>,
+        parent_dir: Arc<Dir>,
         stash: &mut GathererStash,
     ) -> DynResult<()> {
         match entry {
@@ -130,7 +129,7 @@ impl Gatherer {
                         QueueEntry::Entry(TraverseDirectory { path, parent_dir }, prio) => {
                             match parent_dir {
                                 Some(dir) => dir.sub_dir(path.name()),
-                                None => openat::Dir::open(&path.to_pathbuf()),
+                                None => Dir::open(&path.to_pathbuf()),
                             }
                             .map(|dir| {
                                 trace!(
@@ -286,7 +285,7 @@ impl GathererHandle<'_> {
         &mut self,
         entry: &openat::Entry,
         parent_path: Arc<ObjectPath>,
-        parent_dir: Arc<openat::Dir>,
+        parent_dir: Arc<Dir>,
     ) {
         let subdir = ObjectPath::subobject(
             parent_path,
@@ -356,7 +355,7 @@ mod test {
             .start(&|_gatherer: GathererHandle,
                      _entry: openat::Entry,
                      _parent_path: Arc<ObjectPath>,
-                     _parent_dir: Arc<openat::Dir>|
+                     _parent_dir: Arc<Dir>|
              -> DynResult<()> { Ok(()) });
     }
 
@@ -366,11 +365,11 @@ mod test {
         crate::test::init_env_logging();
 
         let (inventory, receiver) = Gatherer::build()
-            .with_gather_threads(64)
+            .with_gather_threads(128)
             .start(&|mut gatherer: GathererHandle,
                      entry: openat::Entry,
                      parent_path: Arc<ObjectPath>,
-                     parent_dir: Arc<openat::Dir>|
+                     parent_dir: Arc<Dir>|
              -> DynResult<()> {
                 match entry.simple_type() {
                     Some(openat::SimpleType::Dir) => {
@@ -409,7 +408,7 @@ mod test {
             .start(&|mut gatherer: GathererHandle,
                      entry: openat::Entry,
                      parent_path: Arc<ObjectPath>,
-                     parent_dir: Arc<openat::Dir>|
+                     parent_dir: Arc<Dir>|
              -> DynResult<()> {
                 match entry.simple_type() {
                     Some(openat::SimpleType::Dir) => {
@@ -445,7 +444,7 @@ mod test {
             .start(&|mut gatherer: GathererHandle,
                      entry: openat::Entry,
                      parent_path: Arc<ObjectPath>,
-                     parent_dir: Arc<openat::Dir>|
+                     parent_dir: Arc<Dir>|
              -> DynResult<()> {
                 match entry.simple_type() {
                     Some(openat::SimpleType::Dir) => {
