@@ -41,6 +41,9 @@ pub struct Gatherer {
     /// Sending an initial directory requires an stash.
     // PLANNED: Also used when one wants to push multiple directories.
     kickoff_stash: Mutex<GathererStash>,
+
+    /// The maximum number of file descriptors this Gatherer may use.
+    fd_limit: usize,
 }
 
 impl Gatherer {
@@ -111,7 +114,6 @@ impl Gatherer {
 
     fn resend_dir(&self, message: DirectoryGatherMessage, prio: u64, stash: &mut GathererStash) {
         self.send_dir(message, prio, stash);
-        warn!("filehandles exhausted");
         thread::sleep(std::time::Duration::from_millis(5));
     }
 
@@ -127,62 +129,76 @@ impl Gatherer {
                     // TODO: messages for dir enter/leave on the ouput queue
                     match self.dirs_queue.recv().entry() {
                         QueueEntry::Entry(TraverseDirectory { path, parent_dir }, prio) => {
-                            match parent_dir {
-                                Some(dir) => dir.sub_dir(path.name()),
-                                None => Dir::open(&path.to_pathbuf()),
-                            }
-                            .map(|dir| {
-                                trace!(
-                                    "opened fd {:?}: for {:?}: depth {}",
-                                    dir,
-                                    path.to_pathbuf(),
-                                    path.depth()
+                            if used_handles() >= self.fd_limit {
+                                warn!("filehandle limit reached");
+                                self.resend_dir(
+                                    TraverseDirectory {
+                                        path:       path.clone(),
+                                        parent_dir: parent_dir.clone(),
+                                    },
+                                    *prio,
+                                    &mut stash,
                                 );
-                                let dir = Arc::new(dir);
-                                dir.list_self()
-                                    .map(|dir_iter| {
-                                        dir_iter.for_each(|entry| {
-                                            self.process_entry(
-                                                entry,
-                                                path.clone(),
-                                                dir.clone(),
-                                                &mut stash,
-                                            )
-                                            .map_err(|e| self.send_error::<()>(e))
-                                            .ok();
-                                        });
-                                        self.dirs_queue.sync(&mut stash);
-                                    })
-                                    .map_err(|e| {
-                                        if e.raw_os_error() == Some(libc::EMFILE) {
-                                            self.resend_dir(
-                                                TraverseDirectory {
-                                                    path:       path.clone(),
-                                                    parent_dir: parent_dir.clone(),
-                                                },
-                                                *prio,
-                                                &mut stash,
-                                            );
-                                        } else {
-                                            self.send_error::<()>(Box::new(e))
-                                        }
-                                    })
-                            })
-                            .map_err(|e| {
-                                if e.raw_os_error() == Some(libc::EMFILE) {
-                                    self.resend_dir(
-                                        TraverseDirectory {
-                                            path:       path.clone(),
-                                            parent_dir: parent_dir.clone(),
-                                        },
-                                        *prio,
-                                        &mut stash,
-                                    );
-                                } else {
-                                    self.send_error::<()>(Box::new(e))
+                            } else {
+                                match parent_dir {
+                                    Some(dir) => dir.sub_dir(path.name()),
+                                    None => Dir::open(&path.to_pathbuf()),
                                 }
-                            })
-                            .ok();
+                                .map(|dir| {
+                                    trace!(
+                                        "opened fd {:?}: for {:?}: depth {}",
+                                        dir,
+                                        path.to_pathbuf(),
+                                        path.depth()
+                                    );
+                                    let dir = Arc::new(dir);
+                                    dir.list_self()
+                                        .map(|dir_iter| {
+                                            dir_iter.for_each(|entry| {
+                                                self.process_entry(
+                                                    entry,
+                                                    path.clone(),
+                                                    dir.clone(),
+                                                    &mut stash,
+                                                )
+                                                .map_err(|e| self.send_error::<()>(e))
+                                                .ok();
+                                            });
+                                            self.dirs_queue.sync(&mut stash);
+                                            crate::dirhandle::dec_handles();
+                                        })
+                                        .map_err(|e| {
+                                            if e.raw_os_error() == Some(libc::EMFILE) {
+                                                self.resend_dir(
+                                                    TraverseDirectory {
+                                                        path:       path.clone(),
+                                                        parent_dir: parent_dir.clone(),
+                                                    },
+                                                    *prio,
+                                                    &mut stash,
+                                                );
+                                            } else {
+                                                self.send_error::<()>(Box::new(e))
+                                            }
+                                        })
+                                })
+                                .map_err(|e| {
+                                    if e.raw_os_error() == Some(libc::EMFILE) {
+                                        warn!("filehandles exhausted");
+                                        self.resend_dir(
+                                            TraverseDirectory {
+                                                path:       path.clone(),
+                                                parent_dir: parent_dir.clone(),
+                                            },
+                                            *prio,
+                                            &mut stash,
+                                        );
+                                    } else {
+                                        self.send_error::<()>(Box::new(e))
+                                    }
+                                })
+                                .ok();
+                            }
                         }
                         QueueEntry::Drained => {
                             trace!("drained!!!");
@@ -198,6 +214,7 @@ impl Gatherer {
 pub struct GathererBuilder {
     num_gather_threads: usize,
     inventory_backlog:  usize,
+    fd_limit:           usize,
 }
 
 impl Default for GathererBuilder {
@@ -211,6 +228,7 @@ impl GathererBuilder {
         GathererBuilder {
             num_gather_threads: 16,
             inventory_backlog:  0,
+            fd_limit:           512,
         }
     }
 
@@ -238,6 +256,7 @@ impl GathererBuilder {
             inventory_send_queue,
             processor,
             kickoff_stash: Mutex::new(GathererStash::new()),
+            fd_limit: self.fd_limit,
         });
 
         (0..self.num_gather_threads).try_for_each(|n| -> io::Result<()> {
@@ -261,13 +280,25 @@ impl GathererBuilder {
         self
     }
 
-    /// Sets the amount of messages
-    /// the  output queue can hold. For cached and readahead data, the kernel can send
-    /// bursts entries to the gatherer threads at very high speeds, since we don't want to
-    /// stall the gathering, the is adds some output buffering. Usually values from 64k to
-    /// 512k should be fine here. When zero (the default) 4k per thread are used.
+    /// Sets the amount of messages the output queue can hold. For cached and readahead data,
+    /// the kernel can send bursts entries to the gatherer threads at very high speeds, since
+    /// we don't want to stall the gathering, the is adds some output buffering. Usually
+    /// values from 64k to 512k should be fine here. When zero (the default) 4k per thread are
+    /// used.
     pub fn with_inventory_backlog(mut self, backlog_size: usize) -> Self {
         self.inventory_backlog = backlog_size;
+        self
+    }
+
+    /// Sets the maximum number of directory handles the Gatherer may use. The Gatherer has a
+    /// build-in strategy handle fd exhaustion when this happens earlier, but keep in mind
+    /// that then there are no fd's for the other parts of the application
+    /// available. Constraining the number of file handles too much will make its slow and
+    /// eventually deadlock. Limit them to no less than num_threads+100 handles! The limits
+    /// are not enforced since the actual amount needed depends a lot factors. Defaults to 512
+    /// fd's which should be plenty for most cases.
+    pub fn with_fd_limit(mut self, fd_limit: usize) -> Self {
+        self.fd_limit = fd_limit;
         self
     }
 }
@@ -366,6 +397,7 @@ mod test {
 
         let (inventory, receiver) = Gatherer::build()
             .with_gather_threads(128)
+            .with_fd_limit(768)
             .start(&|mut gatherer: GathererHandle,
                      entry: openat::Entry,
                      parent_path: Arc<ObjectPath>,
