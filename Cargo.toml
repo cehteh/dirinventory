@@ -21,8 +21,8 @@ libc = "0.2"
 [dev-dependencies]
 env_logger = "0.9"
 
-[profile.release]
-lto = true
+#[profile.release]
+#lto = true
 
 [badges]
 maintenance = { status = "actively-developed" }
