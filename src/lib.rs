@@ -17,9 +17,6 @@ pub use objectpath::ObjectPath;
 mod internednames;
 pub use internednames::{InternedName, InternedNames};
 
-mod priority_queue;
-pub use priority_queue::{PriorityQueue, QueueEntry, ReceiveGuard, Stash};
-
 mod dirhandle;
 pub use dirhandle::{used_handles, Dir};
 pub use openat_ct as openat;

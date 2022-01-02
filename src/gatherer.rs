@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::thread;
 use std::ops::DerefMut;
 
+use mpmcpq::*;
 use crossbeam_channel::{bounded, Receiver, Sender};
 #[allow(unused_imports)]
 pub use log::{debug, error, info, trace, warn};
@@ -19,7 +20,7 @@ use crate::*;
 type ProcessFn =
     dyn Fn(GathererHandle, openat::Entry, Arc<ObjectPath>, Arc<Dir>) -> DynResult<()> + Send + Sync;
 
-type GathererStash = Stash<DirectoryGatherMessage, u64>;
+type GathererStash<'a> = Stash<'a, DirectoryGatherMessage, u64>;
 
 /// Create a space efficient store for file metadata of files larger than a certain
 /// min_blocksize.  This is used to find whcih files to delete first for most space efficient
@@ -40,7 +41,7 @@ pub struct Gatherer {
 
     /// Sending an initial directory requires an stash.
     // PLANNED: Also used when one wants to push multiple directories.
-    kickoff_stash: Mutex<GathererStash>,
+    kickoff_stash: Mutex<GathererStash<'static>>,
 
     /// The maximum number of file descriptors this Gatherer may use.
     fd_limit: usize,
@@ -71,7 +72,7 @@ impl Gatherer {
 
     /// put a message on the input queue.
     #[inline(always)]
-    fn send_dir(&self, message: DirectoryGatherMessage, prio: u64, stash: &mut GathererStash) {
+    fn send_dir(&self, message: DirectoryGatherMessage, prio: u64, stash: &GathererStash) {
         self.dirs_queue.send(message, prio, stash);
     }
 
@@ -91,12 +92,12 @@ impl Gatherer {
 
     /// Called for each entry (including errorneous) found. Calls the user-provided process
     /// function.
-    fn process_entry(
-        &self,
+    fn process_entry<'a>(
+        &'a self,
         entry: io::Result<openat::Entry>,
         parent_path: Arc<ObjectPath>,
         parent_dir: Arc<Dir>,
-        stash: &mut GathererStash,
+        stash: &'a GathererStash<'a>,
     ) -> DynResult<()> {
         match entry {
             Ok(entry) => (self.processor)(
@@ -112,7 +113,7 @@ impl Gatherer {
         }
     }
 
-    fn resend_dir(&self, message: DirectoryGatherMessage, prio: u64, stash: &mut GathererStash) {
+    fn resend_dir(&self, message: DirectoryGatherMessage, prio: u64, stash: &GathererStash) {
         self.send_dir(message, prio, stash);
         thread::sleep(std::time::Duration::from_millis(5));
     }
@@ -122,13 +123,13 @@ impl Gatherer {
         thread::Builder::new()
             .name(format!("dir/gather/{}", n))
             .spawn(move || {
-                let mut stash: GathererStash = Stash::new();
+                let stash: GathererStash = Stash::new(&self.dirs_queue);
                 loop {
                     use DirectoryGatherMessage::*;
 
                     // TODO: messages for dir enter/leave on the ouput queue
-                    match self.dirs_queue.recv().entry() {
-                        QueueEntry::Entry(TraverseDirectory { path, parent_dir }, prio) => {
+                    match self.dirs_queue.recv_guard().message() {
+                        mpmcpq::Message::Msg(TraverseDirectory { path, parent_dir }, prio) => {
                             if used_handles() >= self.fd_limit {
                                 warn!("filehandle limit reached");
                                 self.resend_dir(
@@ -137,7 +138,7 @@ impl Gatherer {
                                         parent_dir: parent_dir.clone(),
                                     },
                                     *prio,
-                                    &mut stash,
+                                    &stash,
                                 );
                             } else {
                                 match parent_dir {
@@ -159,12 +160,12 @@ impl Gatherer {
                                                     entry,
                                                     path.clone(),
                                                     dir.clone(),
-                                                    &mut stash,
+                                                    &stash,
                                                 )
                                                 .map_err(|e| self.send_error::<()>(e))
                                                 .ok();
                                             });
-                                            self.dirs_queue.sync(&mut stash);
+                                            self.dirs_queue.sync(&stash);
                                             crate::dirhandle::dec_handles();
                                         })
                                         .map_err(|e| {
@@ -175,7 +176,7 @@ impl Gatherer {
                                                         parent_dir: parent_dir.clone(),
                                                     },
                                                     *prio,
-                                                    &mut stash,
+                                                    &stash,
                                                 );
                                             } else {
                                                 self.send_error::<()>(Box::new(e))
@@ -191,7 +192,7 @@ impl Gatherer {
                                                 parent_dir: parent_dir.clone(),
                                             },
                                             *prio,
-                                            &mut stash,
+                                            &stash,
                                         );
                                     } else {
                                         self.send_error::<()>(Box::new(e))
@@ -200,7 +201,7 @@ impl Gatherer {
                                 .ok();
                             }
                         }
-                        QueueEntry::Drained => {
+                        mpmcpq::Message::Drained => {
                             trace!("drained!!!");
                             self.send_entry(InventoryEntryMessage::Done);
                         }
@@ -256,7 +257,7 @@ impl GathererBuilder {
             dirs_queue: PriorityQueue::new(),
             inventory_send_queue,
             processor,
-            kickoff_stash: Mutex::new(GathererStash::new()),
+            kickoff_stash: Mutex::new(GathererStash::new_without_priority_queue()),
             fd_limit: self.fd_limit,
         });
 
@@ -308,7 +309,7 @@ impl GathererBuilder {
 // queues.
 pub struct GathererHandle<'a> {
     gatherer: &'a Gatherer,
-    stash:    &'a mut GathererStash,
+    stash:    &'a GathererStash<'a>,
 }
 
 impl GathererHandle<'_> {
