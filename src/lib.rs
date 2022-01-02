@@ -6,7 +6,7 @@
 #![feature(io_error_more)]
 
 mod gatherer;
-pub use gatherer::{Gatherer, GathererBuilder};
+pub use gatherer::{Gatherer, GathererBuilder, ProcessFn};
 
 mod messages;
 pub use messages::{DirectoryGatherMessage, InventoryEntryMessage};

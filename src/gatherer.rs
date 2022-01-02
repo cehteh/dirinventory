@@ -17,7 +17,7 @@ use crate::*;
 // which defines the API for pushing things back on the Gatherers queues, the raw
 // openat::Entry to be processed, an object to the path of the parent directory and the Dir
 // handle of the parent dir.
-type ProcessFn =
+pub type ProcessFn =
     dyn Fn(GathererHandle, openat::Entry, Arc<ObjectPath>, Arc<Dir>) -> DynResult<()> + Send + Sync;
 
 type GathererStash<'a> = Stash<'a, DirectoryGatherMessage, u64>;
