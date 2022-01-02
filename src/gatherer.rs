@@ -13,10 +13,10 @@ use parking_lot::Mutex;
 
 use crate::*;
 
-// The type of the user supplied closure/function to process entries.  Takes a GathererHandle
-// which defines the API for pushing things back on the Gatherers queues, the raw
-// openat::Entry to be processed, an object to the path of the parent directory and the Dir
-// handle of the parent dir.
+/// The type of the user supplied closure/function to process entries.  Takes a GathererHandle
+/// which defines the API for pushing things back on the Gatherers queues, the raw
+/// openat::Entry to be processed, an object to the path of the parent directory and the Dir
+/// handle of the parent dir.
 pub type ProcessFn =
     dyn Fn(GathererHandle, openat::Entry, Arc<ObjectPath>, Arc<Dir>) -> DynResult<()> + Send + Sync;
 
@@ -276,6 +276,7 @@ impl GathererBuilder {
     /// thread numbers in the hundrededs still show some benefits (at high resource
     /// costs). For general operation and on slower HDD's / non cached data 8-64 threads
     /// should be good enough. Default is 16 threads.
+    #[must_use = "GathererBuilder must be used, call .start()"]
     pub fn with_gather_threads(mut self, num_threads: usize) -> Self {
         assert!(num_threads > 0, "Must at least use one thread");
         self.num_gather_threads = num_threads;
@@ -287,6 +288,7 @@ impl GathererBuilder {
     /// we don't want to stall the gathering, the is adds some output buffering. Usually
     /// values from 64k to 512k should be fine here. When zero (the default) 4k per thread are
     /// used.
+    #[must_use = "GathererBuilder must be used, call .start()"]
     pub fn with_inventory_backlog(mut self, backlog_size: usize) -> Self {
         self.inventory_backlog = backlog_size;
         self
@@ -299,6 +301,7 @@ impl GathererBuilder {
     /// eventually deadlock. Limit them to no less than num_threads+100 handles! The limits
     /// are not enforced since the actual amount needed depends a lot factors. Defaults to 512
     /// fd's which should be plenty for most cases.
+    #[must_use = "GathererBuilder must be used, call .start()"]
     pub fn with_fd_limit(mut self, fd_limit: usize) -> Self {
         self.fd_limit = fd_limit;
         self
@@ -330,6 +333,7 @@ impl GathererHandle<'_> {
         // depth inversed from u64::MAX down shifted by 48 bits (resulting in the
         // upper 16bits for the priority). This results in that directories are
         // traversed depth first in inode increasing order.
+        // PLANNED: When deeper than 64k consider it as loop? do a explicit loop check?
         let dir_prio = ((u16::MAX - subdir.depth()) as u64) << 48;
         let message = DirectoryGatherMessage::new_dir(subdir);
 
