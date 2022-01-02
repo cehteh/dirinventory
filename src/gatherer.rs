@@ -45,6 +45,9 @@ pub struct Gatherer {
 
     /// The maximum number of file descriptors this Gatherer may use.
     fd_limit: usize,
+
+    /// Number of DirectoryGathermessages batched together
+    message_batch: usize,
 }
 
 impl Gatherer {
@@ -70,10 +73,16 @@ impl Gatherer {
 
     // TODO: fn shutdown, there is currently no way to free a Gatherer as the threads keep it alive
 
-    /// put a message on the input queue.
+    /// put a DirectoryGatherMessage on the input queue (traverse sub directories).
     #[inline(always)]
     fn send_dir(&self, message: DirectoryGatherMessage, prio: u64, stash: &GathererStash) {
-        self.dirs_queue.send(message, prio, stash);
+        if stash.len() <= self.message_batch {
+            // still batching
+            self.dirs_queue.send_stash(message, prio, stash);
+        } else {
+            // try to send
+            self.dirs_queue.send(message, prio, stash);
+        }
     }
 
     /// put a message on the output queue.
@@ -217,6 +226,7 @@ pub struct GathererBuilder {
     num_gather_threads: usize,
     inventory_backlog:  usize,
     fd_limit:           usize,
+    message_batch:      usize,
 }
 
 impl Default for GathererBuilder {
@@ -231,6 +241,7 @@ impl GathererBuilder {
             num_gather_threads: 16,
             inventory_backlog:  0,
             fd_limit:           512,
+            message_batch:      512,
         }
     }
 
@@ -259,6 +270,7 @@ impl GathererBuilder {
             processor,
             kickoff_stash: Mutex::new(GathererStash::new_without_priority_queue()),
             fd_limit: self.fd_limit,
+            message_batch: self.message_batch,
         });
 
         (0..self.num_gather_threads).try_for_each(|n| -> io::Result<()> {
@@ -304,6 +316,15 @@ impl GathererBuilder {
     #[must_use = "GathererBuilder must be used, call .start()"]
     pub fn with_fd_limit(mut self, fd_limit: usize) -> Self {
         self.fd_limit = fd_limit;
+        self
+    }
+
+    /// Sets size of message batched together. This reduces contention on the priority
+    /// lock. While it won't improve performance it can reduce the CPU load (often
+    /// insignificantly). Defaults to 512, shouldn't need adjustments except for benchmarking.
+    #[must_use = "GathererBuilder must be used, call .start()"]
+    pub fn with_message_batch(mut self, message_batch: usize) -> Self {
+        self.message_batch = message_batch;
         self
     }
 }
