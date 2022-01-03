@@ -339,7 +339,7 @@ pub struct GathererHandle<'a> {
 impl GathererHandle<'_> {
     /// Add a sub directory to the input priority queue to be traversed as well.
     pub fn traverse_dir(
-        &mut self,
+        &self,
         entry: &openat::Entry,
         parent_path: Arc<ObjectPath>,
         parent_dir: Arc<Dir>,
@@ -425,7 +425,7 @@ mod test {
         let (inventory, receiver) = Gatherer::build()
             .with_gather_threads(128)
             .with_fd_limit(768)
-            .start(&|mut gatherer: GathererHandle,
+            .start(&|gatherer: GathererHandle,
                      entry: openat::Entry,
                      parent_path: Arc<ObjectPath>,
                      parent_dir: Arc<Dir>|
@@ -464,7 +464,7 @@ mod test {
         crate::test::init_env_logging();
 
         let (inventory, receiver) = Gatherer::build()
-            .start(&|mut gatherer: GathererHandle,
+            .start(&|gatherer: GathererHandle,
                      entry: openat::Entry,
                      parent_path: Arc<ObjectPath>,
                      parent_dir: Arc<Dir>|
@@ -500,7 +500,7 @@ mod test {
         crate::test::init_env_logging();
 
         let (inventory, receiver) = Gatherer::build()
-            .start(&|mut gatherer: GathererHandle,
+            .start(&|gatherer: GathererHandle,
                      entry: openat::Entry,
                      parent_path: Arc<ObjectPath>,
                      parent_dir: Arc<Dir>|
