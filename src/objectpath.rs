@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use crate::InternedName;
 
-/// Space efficient storage of paths. Instead storing full pathnames it stores only interned
+/// Space efficient storage of paths. Instead storing full path-names it stores only interned
 /// strings of the actual object names and a reference to its parent. Note tat since parents
 /// are usually shared between all ObjectPath instances, the API uses Arc<ObjectPath> instead
 /// plain objects.
@@ -25,7 +25,7 @@ impl ObjectPath {
         })
     }
 
-    /// Creates a new ObjectPath as subobject to some existing ObjectPath object.
+    /// Creates a new ObjectPath as sub-object to some existing ObjectPath object.
     pub fn subobject(self: Arc<Self>, name: InternedName) -> Arc<ObjectPath> {
         Arc::new(ObjectPath {
             parent: Some(self),
@@ -42,10 +42,10 @@ impl ObjectPath {
         target.push(&*self.name);
     }
 
-    /// Construct the ObjectPath as String in the given PathBuf.
+    /// Writes the full ObjectPath to the given PathBuf.
     pub fn write_pathbuf<'a>(&self, target: &'a mut PathBuf) -> &'a PathBuf {
         target.clear();
-        self.pathbuf_push_parents(target, 1 /* for root delimter */);
+        self.pathbuf_push_parents(target, 1 /* for root delimiter */);
         target
     }
 
@@ -53,7 +53,7 @@ impl ObjectPath {
     pub fn to_pathbuf(&self) -> PathBuf {
         // TODO: iterative impl
         let mut target = PathBuf::new();
-        self.pathbuf_push_parents(&mut target, 1 /* for root delimter */);
+        self.pathbuf_push_parents(&mut target, 1 /* for root delimiter */);
         target
     }
 
@@ -62,7 +62,7 @@ impl ObjectPath {
     //
     // }
 
-    /// Returns the number of components in the path
+    /// Returns the number of components in the path.
     pub fn depth(&self) -> u16 {
         let mut counter = 1u16;
         let mut itr = self;
