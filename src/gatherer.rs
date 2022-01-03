@@ -169,6 +169,11 @@ impl Gatherer {
                                                 .map_err(|e| self.send_error::<()>(e))
                                                 .ok();
                                             });
+
+                                            let _ = self.inventory_send_queue.send(
+                                                InventoryEntryMessage::EndOfDirectory(path.clone()),
+                                            );
+
                                             self.dirs_queue.sync(&stash);
                                             crate::dirhandle::dec_handles();
                                         })

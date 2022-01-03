@@ -40,7 +40,8 @@ impl DirectoryGatherMessage {
     }
 }
 
-/// Messages on the output queue, collected entries, 'Done' when the queue becomes empty and errors passed up
+/// Messages on the output queue, collected entries, 'Done' when the queue becomes empty and
+/// errors passed up
 //#[derive(Debug)] FIXME: openat::Metadata is not Debug
 pub enum InventoryEntryMessage {
     /// Passes the path and lightweight data from an openat::Entry, no stat() calls are needed.
@@ -49,11 +50,16 @@ pub enum InventoryEntryMessage {
         Option<openat::SimpleType>,
         openat::metadata_types::ino_t,
     ),
-    /// Passes the path and openat::Metadata. The user has to crete the metadata which may involve costly stat() calls.
+    /// Passes the path and openat::Metadata. The user has to crete the metadata which may
+    /// involve costly stat() calls.
     Metadata(Arc<ObjectPath>, openat::Metadata),
+    /// Send for each Directory when its processing is completed to let the receiver on the
+    /// output know that no more data for this directory will be send.
+    EndOfDirectory(Arc<ObjectPath>),
     /// The Gaterers only pass errors up but try to continue.
     Err(DynError),
-    /// Message when the input queues got empty and no gathering thread still processes any data.
+    /// Message when the input queues got empty and no gathering thread still processes any
+    /// data.
     Done,
     //    Shutdown
 }
@@ -64,6 +70,7 @@ impl Debug for InventoryEntryMessage {
         match self {
             Entry(path, _, _) => write!(f, "Entry {:?}", path.to_pathbuf()),
             Metadata(path, _) => write!(f, "Metadata {:?}", path.to_pathbuf()),
+            EndOfDirectory(path) => write!(f, "EndOfDirectory {:?}", path.to_pathbuf()),
             Err(err) => write!(f, "Error {:?}", err),
             Done => write!(f, "Done"),
         }
