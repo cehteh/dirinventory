@@ -4,7 +4,7 @@
 #![feature(hash_set_entry)]
 
 mod gatherer;
-pub use gatherer::{Gatherer, GathererBuilder, ProcessFn};
+pub use gatherer::{Gatherer, GathererBuilder, GathererHandle, ProcessFn};
 
 mod messages;
 pub use messages::{DirectoryGatherMessage, InventoryEntryMessage};
@@ -16,8 +16,7 @@ mod internednames;
 use internednames::{InternedName, InternedNames};
 
 mod dirhandle;
-use dirhandle::Dir;
-pub use dirhandle::used_handles;
+pub use dirhandle::{used_handles, Dir};
 pub use openat_ct as openat;
 
 /// An user defined processing function can return any kind of error, this needs to be boxed

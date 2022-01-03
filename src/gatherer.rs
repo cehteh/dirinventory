@@ -329,8 +329,8 @@ impl GathererBuilder {
     }
 }
 
-// Defines the API the user defined processor function may use to send data back on the
-// queues.
+/// Defines the API the user defined ProcessFn may use to send data back on the
+/// queues.
 pub struct GathererHandle<'a> {
     gatherer: &'a Gatherer,
     stash:    &'a GathererStash<'a>,
