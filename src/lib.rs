@@ -2,8 +2,6 @@
 #![warn(missing_docs)]
 #![warn(rustdoc::missing_crate_level_docs)]
 #![feature(hash_set_entry)]
-#![feature(dir_entry_ext2)]
-#![feature(io_error_more)]
 
 mod gatherer;
 pub use gatherer::{Gatherer, GathererBuilder, ProcessFn};
@@ -15,7 +13,7 @@ mod objectpath;
 pub use objectpath::ObjectPath;
 
 mod internednames;
-pub use internednames::{InternedName, InternedNames};
+use internednames::{InternedName, InternedNames};
 
 mod dirhandle;
 pub use dirhandle::{used_handles, Dir};
