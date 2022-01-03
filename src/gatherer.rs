@@ -76,13 +76,8 @@ impl Gatherer {
     /// put a DirectoryGatherMessage on the input queue (traverse sub directories).
     #[inline(always)]
     fn send_dir(&self, message: DirectoryGatherMessage, prio: u64, stash: &GathererStash) {
-        if stash.len() <= self.message_batch {
-            // still batching
-            self.dirs_queue.send_stash(message, prio, stash);
-        } else {
-            // try to send
-            self.dirs_queue.send(message, prio, stash);
-        }
+        self.dirs_queue
+            .send_batched(message, prio, self.message_batch, stash);
     }
 
     /// put a message on the output queue.
