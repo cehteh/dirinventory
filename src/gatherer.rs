@@ -31,7 +31,7 @@ pub struct Gatherer {
     names: InternedNames<32>,
 
     /// The processing function
-    processor: &'static ProcessFn,
+    processor: Box<ProcessFn>,
 
     // message queues
     /// The input PriorityQueue fed with directories to be processed
@@ -252,7 +252,7 @@ impl GathererBuilder {
     /// with an Arc<Gatherer> and the receiving end of the output queue.
     pub fn start(
         &self,
-        processor: &'static ProcessFn,
+        processor: Box<ProcessFn>,
     ) -> io::Result<(Arc<Gatherer>, Receiver<InventoryEntryMessage>)> {
         let (inventory_send_queue, receiver) = bounded(
             // when inventory backlog is not set, set it automatically to 4k per thread
@@ -408,13 +408,13 @@ mod test {
     #[test]
     fn smoke() {
         crate::test::init_env_logging();
-        let _ = Gatherer::build()
-            .with_gather_threads(1)
-            .start(&|_gatherer: GathererHandle,
-                     _entry: openat::Entry,
-                     _parent_path: Arc<ObjectPath>,
-                     _parent_dir: Arc<Dir>|
-             -> DynResult<()> { Ok(()) });
+        let _ = Gatherer::build().with_gather_threads(1).start(Box::new(
+            |_gatherer: GathererHandle,
+             _entry: openat::Entry,
+             _parent_path: Arc<ObjectPath>,
+             _parent_dir: Arc<Dir>|
+             -> DynResult<()> { Ok(()) },
+        ));
     }
 
     #[test]
@@ -425,22 +425,24 @@ mod test {
         let (inventory, receiver) = Gatherer::build()
             .with_gather_threads(128)
             .with_fd_limit(768)
-            .start(&|gatherer: GathererHandle,
-                     entry: openat::Entry,
-                     parent_path: Arc<ObjectPath>,
-                     parent_dir: Arc<Dir>|
-             -> DynResult<()> {
-                match entry.simple_type() {
-                    Some(openat::SimpleType::Dir) => {
-                        gatherer.traverse_dir(&entry, parent_path.clone(), parent_dir.clone());
-                        gatherer.output_entry(&entry, parent_path);
+            .start(Box::new(
+                |gatherer: GathererHandle,
+                 entry: openat::Entry,
+                 parent_path: Arc<ObjectPath>,
+                 parent_dir: Arc<Dir>|
+                 -> DynResult<()> {
+                    match entry.simple_type() {
+                        Some(openat::SimpleType::Dir) => {
+                            gatherer.traverse_dir(&entry, parent_path.clone(), parent_dir.clone());
+                            gatherer.output_entry(&entry, parent_path);
+                        }
+                        _ => {
+                            gatherer.output_entry(&entry, parent_path);
+                        }
                     }
-                    _ => {
-                        gatherer.output_entry(&entry, parent_path);
-                    }
-                }
-                Ok(())
-            })
+                    Ok(())
+                },
+            ))
             .unwrap();
         inventory.load_dir_recursive(ObjectPath::new("."));
 
@@ -464,21 +466,23 @@ mod test {
         crate::test::init_env_logging();
 
         let (inventory, receiver) = Gatherer::build()
-            .start(&|gatherer: GathererHandle,
-                     entry: openat::Entry,
-                     parent_path: Arc<ObjectPath>,
-                     parent_dir: Arc<Dir>|
-             -> DynResult<()> {
-                match entry.simple_type() {
-                    Some(openat::SimpleType::Dir) => {
-                        gatherer.traverse_dir(&entry, parent_path.clone(), parent_dir.clone());
+            .start(Box::new(
+                |gatherer: GathererHandle,
+                 entry: openat::Entry,
+                 parent_path: Arc<ObjectPath>,
+                 parent_dir: Arc<Dir>|
+                 -> DynResult<()> {
+                    match entry.simple_type() {
+                        Some(openat::SimpleType::Dir) => {
+                            gatherer.traverse_dir(&entry, parent_path.clone(), parent_dir.clone());
+                        }
+                        _ => {
+                            gatherer.output_entry(&entry, parent_path);
+                        }
                     }
-                    _ => {
-                        gatherer.output_entry(&entry, parent_path);
-                    }
-                }
-                Ok(())
-            })
+                    Ok(())
+                },
+            ))
             .unwrap();
         inventory.load_dir_recursive(ObjectPath::new("src"));
 
@@ -500,21 +504,27 @@ mod test {
         crate::test::init_env_logging();
 
         let (inventory, receiver) = Gatherer::build()
-            .start(&|gatherer: GathererHandle,
-                     entry: openat::Entry,
-                     parent_path: Arc<ObjectPath>,
-                     parent_dir: Arc<Dir>|
-             -> DynResult<()> {
-                match entry.simple_type() {
-                    Some(openat::SimpleType::Dir) => {
-                        Ok(gatherer.traverse_dir(&entry, parent_path.clone(), parent_dir.clone()))
+            .start(Box::new(
+                |gatherer: GathererHandle,
+                 entry: openat::Entry,
+                 parent_path: Arc<ObjectPath>,
+                 parent_dir: Arc<Dir>|
+                 -> DynResult<()> {
+                    match entry.simple_type() {
+                        Some(openat::SimpleType::Dir) => Ok(gatherer.traverse_dir(
+                            &entry,
+                            parent_path.clone(),
+                            parent_dir.clone(),
+                        )),
+                        _ => match parent_dir.metadata(entry.file_name()) {
+                            Ok(metadata) => {
+                                Ok(gatherer.output_metadata(&entry, parent_path, metadata))
+                            }
+                            Err(e) => Err(Box::new(e)),
+                        },
                     }
-                    _ => match parent_dir.metadata(entry.file_name()) {
-                        Ok(metadata) => Ok(gatherer.output_metadata(&entry, parent_path, metadata)),
-                        Err(e) => Err(Box::new(e)),
-                    },
-                }
-            })
+                },
+            ))
             .unwrap();
         inventory.load_dir_recursive(ObjectPath::new("src"));
 
