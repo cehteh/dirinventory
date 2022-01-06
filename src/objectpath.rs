@@ -102,3 +102,17 @@ fn objectpath_path_subobject() {
         &PathBuf::from("./foo")
     );
 }
+
+#[test]
+fn objectpath_path_ordering() {
+    let foo = ObjectPath::new("foo");
+    let bar = ObjectPath::new("bar");
+    assert!(bar < foo);
+
+    let bar2 = ObjectPath::new("bar");
+    assert!(bar == bar2);
+
+    let foobar = foo.clone().subobject(InternedName::new(OsStr::new("bar")));
+    let barfoo = bar.clone().subobject(InternedName::new(OsStr::new("foo")));
+    assert!(barfoo < foobar);
+}
