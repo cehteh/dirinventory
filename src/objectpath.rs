@@ -77,6 +77,21 @@ impl ObjectPath {
     pub fn name(&self) -> &OsStr {
         &self.name
     }
+
+    /// Return the metadata of an objectpath
+    pub fn metadata(&self) -> std::io::Result<crate::openat::Metadata> {
+        let parent = if let Some(parent) = &self.parent {
+            parent.to_pathbuf()
+        } else {
+            PathBuf::from(if Path::new(&*self.name).is_absolute() {
+                std::path::Component::RootDir.as_os_str()
+            } else {
+                std::path::Component::CurDir.as_os_str()
+            })
+        };
+
+        crate::openat::Dir::open(&parent)?.metadata(&*self.name)
+    }
 }
 
 use std::fmt;
@@ -115,4 +130,10 @@ fn objectpath_path_ordering() {
     let foobar = foo.clone().subobject(InternedName::new(OsStr::new("bar")));
     let barfoo = bar.clone().subobject(InternedName::new(OsStr::new("foo")));
     assert!(barfoo < foobar);
+}
+
+#[test]
+fn objectpath_metadata() {
+    let cargo = ObjectPath::new("Cargo.toml");
+    assert!(cargo.metadata().is_ok());
 }
