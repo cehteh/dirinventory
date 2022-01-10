@@ -170,7 +170,10 @@ impl Gatherer {
                                             );
 
                                             let _ = self.output_channels[0].0.send(
-                                                InventoryEntryMessage::EndOfDirectory(path.clone()),
+                                                InventoryEntryMessage::EndOfDirectory(
+                                                    path.clone(),
+                                                    Some(dir.clone()),
+                                                ),
                                             );
 
                                             self.dirs_queue.sync(&stash);
@@ -388,6 +391,7 @@ impl GathererHandle<'_> {
         channel: usize,
         entry: &openat::Entry,
         parent_path: Arc<ObjectPath>,
+        parent_dir: Option<Arc<Dir>>,
     ) {
         let entryname = ObjectPath::subobject(
             parent_path,
@@ -395,7 +399,7 @@ impl GathererHandle<'_> {
         );
         self.gatherer.send_entry(
             channel,
-            InventoryEntryMessage::Entry(entryname, entry.simple_type(), entry.inode()),
+            InventoryEntryMessage::Entry(entryname, parent_dir, entry.simple_type(), entry.inode()),
         );
     }
 
@@ -405,6 +409,7 @@ impl GathererHandle<'_> {
         channel: usize,
         entry: &openat::Entry,
         parent_path: Arc<ObjectPath>,
+        parent_dir: Option<Arc<Dir>>,
         metadata: openat::Metadata,
     ) {
         let entryname = ObjectPath::subobject(
@@ -413,15 +418,21 @@ impl GathererHandle<'_> {
         );
         self.gatherer.send_entry(
             channel,
-            InventoryEntryMessage::Metadata(entryname, metadata),
+            InventoryEntryMessage::Metadata(entryname, parent_dir, metadata),
         );
     }
 
     /// Sends an error to the output channel
-    pub fn output_error(&self, channel: usize, error: DynError, path: Arc<ObjectPath>) {
+    pub fn output_error(
+        &self,
+        channel: usize,
+        error: DynError,
+        path: Arc<ObjectPath>,
+        parent_dir: Option<Arc<Dir>>,
+    ) {
         warn!("{:?} at {:?}", error, path);
         self.gatherer
-            .send_entry(channel, InventoryEntryMessage::Err(path, error));
+            .send_entry(channel, InventoryEntryMessage::Err(path, parent_dir, error));
     }
 }
 
@@ -457,15 +468,24 @@ mod test {
                     match entry {
                         ProcessEntry::Result(Ok(entry), parent_path) => match entry.simple_type() {
                             Some(openat::SimpleType::Dir) => {
-                                gatherer.traverse_dir(&entry, parent_path.clone(), parent_dir);
-                                gatherer.output_entry(0, &entry, parent_path.clone());
+                                gatherer.traverse_dir(
+                                    &entry,
+                                    parent_path.clone(),
+                                    parent_dir.clone(),
+                                );
+                                gatherer.output_entry(
+                                    0,
+                                    &entry,
+                                    parent_path.clone(),
+                                    parent_dir.clone(),
+                                );
                             }
                             _ => {
-                                gatherer.output_entry(0, &entry, parent_path);
+                                gatherer.output_entry(0, &entry, parent_path, parent_dir);
                             }
                         },
                         ProcessEntry::Result(Err(err), parent_path) => {
-                            gatherer.output_error(0, Box::new(err), parent_path);
+                            gatherer.output_error(0, Box::new(err), parent_path, parent_dir);
                         }
                         _ => {}
                     }
@@ -504,11 +524,11 @@ mod test {
                                 gatherer.traverse_dir(&entry, parent_path.clone(), parent_dir);
                             }
                             _ => {
-                                gatherer.output_entry(0, &entry, parent_path);
+                                gatherer.output_entry(0, &entry, parent_path, parent_dir);
                             }
                         },
                         ProcessEntry::Result(Err(err), parent_path) => {
-                            gatherer.output_error(0, Box::new(err), parent_path);
+                            gatherer.output_error(0, Box::new(err), parent_path, parent_dir);
                         }
                         _ => {}
                     }
@@ -544,17 +564,28 @@ mod test {
                             Some(openat::SimpleType::Dir) => {
                                 gatherer.traverse_dir(&entry, parent_path.clone(), parent_dir);
                             }
-                            _ => match parent_dir.unwrap().metadata(entry.file_name()) {
+                            _ => match parent_dir.clone().unwrap().metadata(entry.file_name()) {
                                 Ok(metadata) => {
-                                    gatherer.output_metadata(0, &entry, parent_path, metadata);
+                                    gatherer.output_metadata(
+                                        0,
+                                        &entry,
+                                        parent_path,
+                                        parent_dir,
+                                        metadata,
+                                    );
                                 }
                                 Err(err) => {
-                                    gatherer.output_error(0, Box::new(err), parent_path);
+                                    gatherer.output_error(
+                                        0,
+                                        Box::new(err),
+                                        parent_path,
+                                        parent_dir,
+                                    );
                                 }
                             },
                         },
                         ProcessEntry::Result(Err(err), parent_path) => {
-                            gatherer.output_error(0, Box::new(err), parent_path);
+                            gatherer.output_error(0, Box::new(err), parent_path, parent_dir);
                         }
                         _ => {}
                     }

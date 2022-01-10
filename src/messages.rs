@@ -47,17 +47,18 @@ pub enum InventoryEntryMessage {
     /// Passes the path and lightweight data from an openat::Entry, no stat() calls are needed.
     Entry(
         Arc<ObjectPath>,
+        Option<Arc<Dir>>,
         Option<openat::SimpleType>,
         openat::metadata_types::ino_t,
     ),
     /// Passes the path and openat::Metadata. The user has to crete the metadata which may
     /// involve costly stat() calls.
-    Metadata(Arc<ObjectPath>, openat::Metadata),
+    Metadata(Arc<ObjectPath>, Option<Arc<Dir>>, openat::Metadata),
     /// Send for each Directory when its processing is completed to let the receiver on the
     /// output know that no more data for this directory will be send.
-    EndOfDirectory(Arc<ObjectPath>),
+    EndOfDirectory(Arc<ObjectPath>, Option<Arc<Dir>>),
     /// The Gaterers only pass errors up but try to continue.
-    Err(Arc<ObjectPath>, DynError),
+    Err(Arc<ObjectPath>, Option<Arc<Dir>>, DynError),
     /// Message when the input queues got empty and no gathering thread still processes any
     /// data.
     Done,
@@ -68,10 +69,10 @@ impl Debug for InventoryEntryMessage {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
         use InventoryEntryMessage::*;
         match self {
-            Entry(path, _, _) => write!(f, "Entry {:?}", path.to_pathbuf()),
-            Metadata(path, _) => write!(f, "Metadata {:?}", path.to_pathbuf()),
-            EndOfDirectory(path) => write!(f, "EndOfDirectory {:?}", path.to_pathbuf()),
-            Err(path, err) => write!(f, "Error {:?} at {:?}", err, path.to_pathbuf()),
+            Entry(path, _, _, _) => write!(f, "Entry {:?}", path.to_pathbuf()),
+            Metadata(path, _, _) => write!(f, "Metadata {:?}", path.to_pathbuf()),
+            EndOfDirectory(path, _) => write!(f, "EndOfDirectory {:?}", path.to_pathbuf()),
+            Err(path, _, err) => write!(f, "Error {:?} at {:?}", err, path.to_pathbuf()),
             Done => write!(f, "Done"),
         }
     }
@@ -82,14 +83,14 @@ impl InventoryEntryMessage {
     pub fn path(&self) -> Option<&ObjectPath> {
         use InventoryEntryMessage::*;
         match self {
-            Entry(path, _, _) => Some(path),
-            Metadata(path, _) => Some(path),
+            Entry(path, _, _, _) => Some(path),
+            Metadata(path, _, _) => Some(path),
             _ => None,
         }
     }
 
     /// Returns true when this message is an error message.
     pub fn is_error(&self) -> bool {
-        matches!(self, InventoryEntryMessage::Err(_, _))
+        matches!(self, InventoryEntryMessage::Err(_, _, _))
     }
 }
