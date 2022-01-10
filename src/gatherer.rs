@@ -35,9 +35,12 @@ pub struct Gatherer {
 
     // message queues
     /// The input PriorityQueue fed with directories to be processed
-    dirs_queue:           PriorityQueue<DirectoryGatherMessage, u64>,
-    /// The output queue where the results are send to.
-    inventory_send_queue: Sender<InventoryEntryMessage>,
+    dirs_queue:      PriorityQueue<DirectoryGatherMessage, u64>,
+    /// The output channels where the results are send to.
+    output_channels: Vec<(
+        Sender<InventoryEntryMessage>,
+        Arc<Receiver<InventoryEntryMessage>>,
+    )>,
 
     /// Sending an initial directory requires an stash.
     // PLANNED: Also used when one wants to push multiple directories.
@@ -56,6 +59,11 @@ impl Gatherer {
     #[must_use = "configure the Gatherer and finally call .start()"]
     pub fn build() -> GathererBuilder {
         GathererBuilder::new()
+    }
+
+    /// Returns the an Arc of the receiver side of output channel 'n'.
+    pub fn channel(&self, n: usize) -> Arc<Receiver<InventoryEntryMessage>> {
+        self.output_channels[n].1.clone()
     }
 
     /// Adds a directory to the processing queue of the inventory. This is the main function
@@ -80,18 +88,18 @@ impl Gatherer {
             .send_batched(message, prio, self.message_batch, stash);
     }
 
-    /// put a message on the output queue.
+    /// Put a message on an output channel.
     #[inline(always)]
-    fn send_entry(&self, message: InventoryEntryMessage) {
+    fn send_entry(&self, channel: usize, message: InventoryEntryMessage) {
         // Ignore result, the user may have dropped the receiver, but there is nothing we
         // should do about it.
-        let _ = self.inventory_send_queue.send(message);
+        let _ = self.output_channels[channel].0.send(message);
     }
 
-    /// sends error to output channel and returns it
+    /// sends error to output channel 0
     fn send_error<T>(&self, err: DynError) {
         warn!("{:?}", err);
-        self.send_entry(InventoryEntryMessage::Err(err));
+        self.send_entry(0, InventoryEntryMessage::Err(err));
     }
 
     /// Called for each entry (including errorneous) found. Calls the user-provided process
@@ -170,7 +178,7 @@ impl Gatherer {
                                                 .ok();
                                             });
 
-                                            let _ = self.inventory_send_queue.send(
+                                            let _ = self.output_channels[0].0.send(
                                                 InventoryEntryMessage::EndOfDirectory(path.clone()),
                                             );
 
@@ -212,7 +220,7 @@ impl Gatherer {
                         }
                         mpmcpq::Message::Drained => {
                             trace!("drained!!!");
-                            self.send_entry(InventoryEntryMessage::Done);
+                            self.send_entry(0, InventoryEntryMessage::Done);
                         }
                         _ => unimplemented!(),
                     }
@@ -223,10 +231,11 @@ impl Gatherer {
 
 /// Configures a Gatherer
 pub struct GathererBuilder {
-    num_gather_threads: usize,
-    inventory_backlog:  usize,
-    fd_limit:           usize,
-    message_batch:      usize,
+    num_gather_threads:  usize,
+    num_output_channels: usize,
+    inventory_backlog:   usize,
+    fd_limit:            usize,
+    message_batch:       usize,
 }
 
 impl Default for GathererBuilder {
@@ -238,35 +247,37 @@ impl Default for GathererBuilder {
 impl GathererBuilder {
     fn new() -> Self {
         GathererBuilder {
-            num_gather_threads: 16,
-            inventory_backlog:  0,
-            fd_limit:           512,
-            message_batch:      512,
+            num_gather_threads:  16,
+            num_output_channels: 1,
+            inventory_backlog:   0,
+            fd_limit:            512,
+            message_batch:       512,
         }
     }
 
     /// Starts the Gatherer. Takes the user defined processing function as argument. This
     /// function is used to process every directory entry seen. It should be small and fast
     /// selecting which sub directories to be traversed and which entries to pass to the
-    /// output queue. Any more work should be done on the output then. Returns a Result tuple
-    /// with an Arc<Gatherer> and the receiving end of the output queue.
-    pub fn start(
-        &self,
-        processor: Box<ProcessFn>,
-    ) -> io::Result<(Arc<Gatherer>, Receiver<InventoryEntryMessage>)> {
-        let (inventory_send_queue, receiver) = bounded(
-            // when inventory backlog is not set, set it automatically to 4k per thread
-            if self.inventory_backlog == 0 {
-                4096 * self.num_gather_threads
-            } else {
-                self.inventory_backlog
-            },
-        );
+    /// output channels. Any more work should be done on the output then.
+    pub fn start(&self, processor: Box<ProcessFn>) -> io::Result<Arc<Gatherer>> {
+        let output_channels = (0..self.num_output_channels)
+            .map(|_| {
+                let (sender, receiver) = bounded(
+                    // when inventory backlog is not set, set it automatically to 4k per thread
+                    if self.inventory_backlog == 0 {
+                        4096 * self.num_gather_threads
+                    } else {
+                        self.inventory_backlog
+                    },
+                );
+                (sender, Arc::new(receiver))
+            })
+            .collect();
 
         let gatherer = Arc::new(Gatherer {
             names: InternedNames::new(),
             dirs_queue: PriorityQueue::new(),
-            inventory_send_queue,
+            output_channels,
             processor,
             kickoff_stash: Mutex::new(GathererStash::new_without_priority_queue()),
             fd_limit: self.fd_limit,
@@ -279,7 +290,7 @@ impl GathererBuilder {
         })?;
 
         debug!("created gatherer");
-        Ok((gatherer, receiver))
+        Ok(gatherer)
     }
 
     /// Sets the number of threads which traverse the directories. These are IO-bound
@@ -295,7 +306,7 @@ impl GathererBuilder {
         self
     }
 
-    /// Sets the amount of messages the output queue can hold. For cached and readahead data,
+    /// Sets the amount of messages the output channels can hold. For cached and readahead data,
     /// the kernel can send bursts entries to the gatherer threads at very high speeds, since
     /// we don't want to stall the gathering, the is adds some output buffering. Usually
     /// values from 64k to 512k should be fine here. When zero (the default) 4k per thread are
@@ -330,7 +341,7 @@ impl GathererBuilder {
 }
 
 /// Defines the API the user defined ProcessFn may use to send data back on the
-/// queues.
+/// input queue and output channels.
 pub struct GathererHandle<'a> {
     gatherer: &'a Gatherer,
     stash:    &'a GathererStash<'a>,
@@ -365,22 +376,27 @@ impl GathererHandle<'_> {
         );
     }
 
-    /// Sends openat::Entry components to the output queue
-    pub fn output_entry(&self, entry: &openat::Entry, parent_path: Arc<ObjectPath>) {
+    /// Sends openat::Entry components to the output channel.
+    pub fn output_entry(
+        &self,
+        channel: usize,
+        entry: &openat::Entry,
+        parent_path: Arc<ObjectPath>,
+    ) {
         let entryname = ObjectPath::subobject(
             parent_path,
             self.gatherer.names.interning(entry.file_name()),
         );
-        self.gatherer.send_entry(InventoryEntryMessage::Entry(
-            entryname,
-            entry.simple_type(),
-            entry.inode(),
-        ));
+        self.gatherer.send_entry(
+            channel,
+            InventoryEntryMessage::Entry(entryname, entry.simple_type(), entry.inode()),
+        );
     }
 
-    /// Sends openat::Metadata to the output queue
+    /// Sends openat::Metadata to the output channel
     pub fn output_metadata(
         &self,
+        channel: usize,
         entry: &openat::Entry,
         parent_path: Arc<ObjectPath>,
         metadata: openat::Metadata,
@@ -389,8 +405,10 @@ impl GathererHandle<'_> {
             parent_path,
             self.gatherer.names.interning(entry.file_name()),
         );
-        self.gatherer
-            .send_entry(InventoryEntryMessage::Metadata(entryname, metadata));
+        self.gatherer.send_entry(
+            channel,
+            InventoryEntryMessage::Metadata(entryname, metadata),
+        );
     }
 }
 
@@ -422,7 +440,7 @@ mod test {
     fn load_dir() {
         crate::test::init_env_logging();
 
-        let (inventory, receiver) = Gatherer::build()
+        let gatherer = Gatherer::build()
             .with_gather_threads(128)
             .with_fd_limit(768)
             .start(Box::new(
@@ -434,21 +452,23 @@ mod test {
                     match entry.simple_type() {
                         Some(openat::SimpleType::Dir) => {
                             gatherer.traverse_dir(&entry, parent_path.clone(), parent_dir.clone());
-                            gatherer.output_entry(&entry, parent_path);
+                            gatherer.output_entry(0, &entry, parent_path);
                         }
                         _ => {
-                            gatherer.output_entry(&entry, parent_path);
+                            gatherer.output_entry(0, &entry, parent_path);
                         }
                     }
                     Ok(())
                 },
             ))
             .unwrap();
-        inventory.load_dir_recursive(ObjectPath::new("."));
+
+        gatherer.load_dir_recursive(ObjectPath::new("."));
 
         let mut stdout = std::io::stdout();
 
-        receiver
+        gatherer
+            .channel(0)
             .iter()
             .take_while(|msg| !matches!(msg, InventoryEntryMessage::Done))
             .for_each(|msg| {
@@ -465,7 +485,7 @@ mod test {
     fn entry_messages() {
         crate::test::init_env_logging();
 
-        let (inventory, receiver) = Gatherer::build()
+        let gatherer = Gatherer::build()
             .start(Box::new(
                 |gatherer: GathererHandle,
                  entry: openat::Entry,
@@ -477,18 +497,19 @@ mod test {
                             gatherer.traverse_dir(&entry, parent_path.clone(), parent_dir.clone());
                         }
                         _ => {
-                            gatherer.output_entry(&entry, parent_path);
+                            gatherer.output_entry(0, &entry, parent_path);
                         }
                     }
                     Ok(())
                 },
             ))
             .unwrap();
-        inventory.load_dir_recursive(ObjectPath::new("src"));
+        gatherer.load_dir_recursive(ObjectPath::new("src"));
 
         let mut stdout = std::io::stdout();
 
-        receiver
+        gatherer
+            .channel(0)
             .iter()
             .take_while(|msg| !matches!(msg, InventoryEntryMessage::Done))
             .for_each(|msg| {
@@ -503,7 +524,7 @@ mod test {
     fn metadata_messages() {
         crate::test::init_env_logging();
 
-        let (inventory, receiver) = Gatherer::build()
+        let gatherer = Gatherer::build()
             .start(Box::new(
                 |gatherer: GathererHandle,
                  entry: openat::Entry,
@@ -518,7 +539,7 @@ mod test {
                         )),
                         _ => match parent_dir.metadata(entry.file_name()) {
                             Ok(metadata) => {
-                                Ok(gatherer.output_metadata(&entry, parent_path, metadata))
+                                Ok(gatherer.output_metadata(0, &entry, parent_path, metadata))
                             }
                             Err(e) => Err(Box::new(e)),
                         },
@@ -526,11 +547,12 @@ mod test {
                 },
             ))
             .unwrap();
-        inventory.load_dir_recursive(ObjectPath::new("src"));
+        gatherer.load_dir_recursive(ObjectPath::new("src"));
 
         let mut stdout = std::io::stdout();
 
-        receiver
+        gatherer
+            .channel(0)
             .iter()
             .take_while(|msg| !matches!(msg, InventoryEntryMessage::Done))
             .for_each(|msg| {
