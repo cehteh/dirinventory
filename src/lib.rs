@@ -4,7 +4,7 @@
 #![feature(hash_set_entry)]
 
 mod gatherer;
-pub use gatherer::{Gatherer, GathererBuilder, GathererHandle, ProcessFn};
+pub use gatherer::{Gatherer, GathererBuilder, GathererHandle, ProcessEntry, ProcessFn};
 
 mod messages;
 pub use messages::{DirectoryGatherMessage, InventoryEntryMessage};

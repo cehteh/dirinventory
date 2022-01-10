@@ -29,13 +29,13 @@ impl DirectoryGatherMessage {
 
     /// Attach a parent handle to a 'TraverseDirectory' message. Must not be used with other messages!
     #[must_use]
-    pub fn with_parent(mut self, parent: Arc<Dir>) -> Self {
+    pub fn with_parent_dir(mut self, parent: Option<Arc<Dir>>) -> Self {
         debug_assert!(matches!(
             self,
             DirectoryGatherMessage::TraverseDirectory { .. }
         ));
         let DirectoryGatherMessage::TraverseDirectory { parent_dir, .. } = &mut self;
-        *parent_dir = Some(parent);
+        *parent_dir = parent;
         self
     }
 }
@@ -57,7 +57,7 @@ pub enum InventoryEntryMessage {
     /// output know that no more data for this directory will be send.
     EndOfDirectory(Arc<ObjectPath>),
     /// The Gaterers only pass errors up but try to continue.
-    Err(DynError),
+    Err(Arc<ObjectPath>, DynError),
     /// Message when the input queues got empty and no gathering thread still processes any
     /// data.
     Done,
@@ -71,7 +71,7 @@ impl Debug for InventoryEntryMessage {
             Entry(path, _, _) => write!(f, "Entry {:?}", path.to_pathbuf()),
             Metadata(path, _) => write!(f, "Metadata {:?}", path.to_pathbuf()),
             EndOfDirectory(path) => write!(f, "EndOfDirectory {:?}", path.to_pathbuf()),
-            Err(err) => write!(f, "Error {:?}", err),
+            Err(path, err) => write!(f, "Error {:?} at {:?}", err, path.to_pathbuf()),
             Done => write!(f, "Done"),
         }
     }
@@ -90,6 +90,6 @@ impl InventoryEntryMessage {
 
     /// Returns true when this message is an error message.
     pub fn is_error(&self) -> bool {
-        matches!(self, InventoryEntryMessage::Err(_))
+        matches!(self, InventoryEntryMessage::Err(_, _))
     }
 }
