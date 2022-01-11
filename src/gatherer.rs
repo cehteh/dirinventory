@@ -76,6 +76,19 @@ impl Gatherer {
         self.output_channels[n].1.clone()
     }
 
+    /// Returns the number of output channels.
+    pub fn num_channels(&self) -> usize {
+        self.output_channels.len()
+    }
+
+    /// Returns a Vec with all receiving sides of the output channels.
+    pub fn channels_as_vec(&self) -> Vec<Arc<Receiver<InventoryEntryMessage>>> {
+        self.output_channels
+            .iter()
+            .map(|(_, r)| r.clone())
+            .collect()
+    }
+
     /// Adds a directory to the processing queue of the inventory. This is the main function
     /// to initiate a directory traversal.
     pub fn load_dir_recursive(&self, path: Arc<ObjectPath>) {
