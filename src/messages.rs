@@ -45,20 +45,43 @@ impl DirectoryGatherMessage {
 //#[derive(Debug)] FIXME: openat::Metadata is not Debug
 pub enum InventoryEntryMessage {
     /// Passes the path and lightweight data from an openat::Entry, no stat() calls are needed.
-    Entry(
-        Arc<ObjectPath>,
-        Option<Arc<Dir>>,
-        Option<openat::SimpleType>,
-        openat::metadata_types::ino_t,
-    ),
+    Entry {
+        /// Filename of this entry.
+        path:       Arc<ObjectPath>,
+        /// Handle to the containing directory.
+        parent_dir: Option<Arc<Dir>>,
+        /// Type of file.
+        file_type:  Option<openat::SimpleType>,
+        /// Inode number.
+        inode:      openat::metadata_types::ino_t,
+    },
     /// Passes the path and openat::Metadata. The user has to crete the metadata which may
     /// involve costly stat() calls.
-    Metadata(Arc<ObjectPath>, Option<Arc<Dir>>, openat::Metadata),
+    Metadata {
+        /// Filename of this entry.
+        path:       Arc<ObjectPath>,
+        /// Handle to the containing directory.
+        parent_dir: Option<Arc<Dir>>,
+        /// Metadata for this entry.
+        metadata:   openat::Metadata,
+    },
     /// Send for each Directory when its processing is completed to let the receiver on the
     /// output know that no more data for this directory will be send.
-    EndOfDirectory(Arc<ObjectPath>, Option<Arc<Dir>>),
+    EndOfDirectory {
+        /// Filename of this entry.
+        path:       Arc<ObjectPath>,
+        /// Handle to the containing directory.
+        parent_dir: Option<Arc<Dir>>,
+    },
     /// The Gaterers only pass errors up but try to continue.
-    Err(Arc<ObjectPath>, Option<Arc<Dir>>, DynError),
+    Err {
+        /// Filename of this entry.
+        path:       Arc<ObjectPath>,
+        /// Handle to the containing directory.
+        parent_dir: Option<Arc<Dir>>,
+        /// The error.
+        error:      DynError,
+    },
     /// Message when the input queues got empty and no gathering thread still processes any
     /// data.
     Done,
@@ -69,10 +92,10 @@ impl Debug for InventoryEntryMessage {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
         use InventoryEntryMessage::*;
         match self {
-            Entry(path, _, _, _) => write!(f, "Entry {:?}", path.to_pathbuf()),
-            Metadata(path, _, _) => write!(f, "Metadata {:?}", path.to_pathbuf()),
-            EndOfDirectory(path, _) => write!(f, "EndOfDirectory {:?}", path.to_pathbuf()),
-            Err(path, _, err) => write!(f, "Error {:?} at {:?}", err, path.to_pathbuf()),
+            Entry { path, .. } => write!(f, "Entry {:?}", path.to_pathbuf()),
+            Metadata { path, .. } => write!(f, "Metadata {:?}", path.to_pathbuf()),
+            EndOfDirectory { path, .. } => write!(f, "EndOfDirectory {:?}", path.to_pathbuf()),
+            Err { path, error, .. } => write!(f, "Error {:?} at {:?}", error, path.to_pathbuf()),
             Done => write!(f, "Done"),
         }
     }
@@ -83,14 +106,14 @@ impl InventoryEntryMessage {
     pub fn path(&self) -> Option<&ObjectPath> {
         use InventoryEntryMessage::*;
         match self {
-            Entry(path, _, _, _) => Some(path),
-            Metadata(path, _, _) => Some(path),
+            Entry { path, .. } => Some(path),
+            Metadata { path, .. } => Some(path),
             _ => None,
         }
     }
 
     /// Returns true when this message is an error message.
     pub fn is_error(&self) -> bool {
-        matches!(self, InventoryEntryMessage::Err(_, _, _))
+        matches!(self, InventoryEntryMessage::Err { .. })
     }
 }

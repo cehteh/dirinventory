@@ -170,10 +170,10 @@ impl Gatherer {
                                             );
 
                                             let _ = self.output_channels[0].0.send(
-                                                InventoryEntryMessage::EndOfDirectory(
-                                                    path.clone(),
-                                                    Some(dir.clone()),
-                                                ),
+                                                InventoryEntryMessage::EndOfDirectory {
+                                                    path:       path.clone(),
+                                                    parent_dir: Some(dir.clone()),
+                                                },
                                             );
 
                                             self.dirs_queue.sync(&stash);
@@ -393,14 +393,17 @@ impl GathererHandle<'_> {
         parent_path: Arc<ObjectPath>,
         parent_dir: Option<Arc<Dir>>,
     ) {
-        let entryname = ObjectPath::subobject(
+        let path = ObjectPath::subobject(
             parent_path,
             self.gatherer.names.interning(entry.file_name()),
         );
-        self.gatherer.send_entry(
-            channel,
-            InventoryEntryMessage::Entry(entryname, parent_dir, entry.simple_type(), entry.inode()),
-        );
+        self.gatherer
+            .send_entry(channel, InventoryEntryMessage::Entry {
+                path,
+                parent_dir,
+                file_type: entry.simple_type(),
+                inode: entry.inode(),
+            });
     }
 
     /// Sends openat::Metadata to the output channel
@@ -416,10 +419,12 @@ impl GathererHandle<'_> {
             parent_path,
             self.gatherer.names.interning(entry.file_name()),
         );
-        self.gatherer.send_entry(
-            channel,
-            InventoryEntryMessage::Metadata(entryname, parent_dir, metadata),
-        );
+        self.gatherer
+            .send_entry(channel, InventoryEntryMessage::Metadata {
+                path: entryname,
+                parent_dir,
+                metadata,
+            });
     }
 
     /// Sends an error to the output channel
@@ -432,7 +437,11 @@ impl GathererHandle<'_> {
     ) {
         warn!("{:?} at {:?}", error, path);
         self.gatherer
-            .send_entry(channel, InventoryEntryMessage::Err(path, parent_dir, error));
+            .send_entry(channel, InventoryEntryMessage::Err {
+                path,
+                parent_dir,
+                error,
+            });
     }
 }
 
