@@ -111,12 +111,19 @@ impl Gatherer {
             .send_batched(message, prio, self.message_batch, stash);
     }
 
-    /// Put a message on an output channel.
+    /// Put a message on an output channel. The channels are used modulo the
+    /// output_channels.len(), thus can never overflow and a user may use a hash/larger number
+    /// than available.
     #[inline(always)]
     fn send_entry(&self, channel: usize, message: InventoryEntryMessage) {
         // Ignore result, the user may have dropped the receiver, but there is nothing we
         // should do about it.
-        let _ = self.output_channels[channel].0.send(message);
+        let _ = unsafe {
+            self.output_channels
+                .get_unchecked(channel % self.output_channels.len())
+                .0
+                .send(message)
+        };
     }
 
     fn resend_dir(&self, message: DirectoryGatherMessage, prio: u64, stash: &GathererStash) {
@@ -397,7 +404,9 @@ impl GathererHandle<'_> {
         );
     }
 
-    /// Sends openat::Entry components to the output channel.
+    /// Sends openat::Entry components to the output channel. 'channel' can be any number as send wraps
+    /// it by modulo the real number of channels. This allows to use any usize hash or
+    /// otherwise large number.
     pub fn output_entry(
         &self,
         channel: usize,
@@ -416,7 +425,9 @@ impl GathererHandle<'_> {
             });
     }
 
-    /// Sends openat::Metadata to the output channel
+    /// Sends openat::Metadata to the output channel.  'channel' can be any number as send wraps
+    /// it by modulo the real number of channels. This allows to use any usize hash or
+    /// otherwise large number.
     pub fn output_metadata(
         &self,
         channel: usize,
@@ -435,7 +446,9 @@ impl GathererHandle<'_> {
             });
     }
 
-    /// Sends an error to the output channel
+    /// Sends an error to the output channel.  'channel' can be any number as send wraps
+    /// it by modulo the real number of channels. This allows to use any usize hash or
+    /// otherwise large number.
     pub fn output_error(&self, channel: usize, error: DynError, path: Arc<ObjectPath>) {
         warn!("{:?} at {:?}", error, path);
         self.gatherer
