@@ -47,40 +47,32 @@ pub enum InventoryEntryMessage {
     /// Passes the path and lightweight data from an openat::Entry, no stat() calls are needed.
     Entry {
         /// Filename of this entry.
-        path:       Arc<ObjectPath>,
-        /// Handle to the containing directory.
-        parent_dir: Option<Arc<Dir>>,
+        path:      Arc<ObjectPath>,
         /// Type of file.
-        file_type:  Option<openat::SimpleType>,
+        file_type: Option<openat::SimpleType>,
         /// Inode number.
-        inode:      openat::metadata_types::ino_t,
+        inode:     openat::metadata_types::ino_t,
     },
     /// Passes the path and openat::Metadata. The user has to crete the metadata which may
     /// involve costly stat() calls.
     Metadata {
         /// Filename of this entry.
-        path:       Arc<ObjectPath>,
-        /// Handle to the containing directory.
-        parent_dir: Option<Arc<Dir>>,
+        path:     Arc<ObjectPath>,
         /// Metadata for this entry.
-        metadata:   openat::Metadata,
+        metadata: openat::Metadata,
     },
     /// Send for each Directory when its processing is completed to let the receiver on the
     /// output know that no more data for this directory will be send.
     EndOfDirectory {
         /// Filename of this entry.
-        path:       Arc<ObjectPath>,
-        /// Handle to the containing directory.
-        parent_dir: Option<Arc<Dir>>,
+        path: Arc<ObjectPath>,
     },
     /// The Gaterers only pass errors up but try to continue.
     Err {
         /// Filename of this entry.
-        path:       Arc<ObjectPath>,
-        /// Handle to the containing directory.
-        parent_dir: Option<Arc<Dir>>,
+        path:  Arc<ObjectPath>,
         /// The error.
-        error:      DynError,
+        error: DynError,
     },
     /// Message when the input queues got empty and no gathering thread still processes any
     /// data.
