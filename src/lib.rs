@@ -13,7 +13,7 @@ mod objectpath;
 pub use objectpath::ObjectPath;
 
 mod internednames;
-use internednames::{InternedName, InternedNames};
+pub use internednames::{InternedName, InternedNames};
 
 mod dirhandle;
 pub use dirhandle::{used_handles, Dir};
