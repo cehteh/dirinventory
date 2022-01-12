@@ -335,6 +335,19 @@ impl GathererBuilder {
         self
     }
 
+    /// Sets the number of threads which traverse the directories. These are IO-bound
+    /// operations and the more threads are used the better are the opportunities for the
+    /// kernel to optimize IO-Requests. Tests have shown that on fast SSD's and cached data
+    /// thread numbers in the hundrededs still show some benefits (at high resource
+    /// costs). For general operation and on slower HDD's / non cached data 8-64 threads
+    /// should be good enough. Default is 16 threads.
+    #[must_use = "GathererBuilder must be used, call .start()"]
+    pub fn with_output_channels(mut self, num_channels: usize) -> Self {
+        assert!(num_channels > 0, "Must at least use one channel");
+        self.num_output_channels = num_channels;
+        self
+    }
+
     /// Sets the amount of messages the output channels can hold. For cached and readahead data,
     /// the kernel can send bursts entries to the gatherer threads at very high speeds, since
     /// we don't want to stall the gathering, the is adds some output buffering. Usually
