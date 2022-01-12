@@ -134,8 +134,9 @@ impl Gatherer {
     /// Spawns a single gatherer thread
     fn spawn_gather_thread(self: Arc<Self>, n: usize) -> io::Result<thread::JoinHandle<()>> {
         thread::Builder::new()
-            .name(format!("dir/gather/{}", n))
+            .name(format!("gather/{}", n))
             .spawn(move || {
+                debug!("thread started: {}", thread::current().name().unwrap());
                 let stash: GathererStash = Stash::new(&self.dirs_queue);
                 loop {
                     use DirectoryGatherMessage::*;
