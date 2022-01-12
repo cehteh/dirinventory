@@ -180,7 +180,6 @@ impl Gatherer {
                                                 );
                                             });
 
-                                            // TODO: use processfn
                                             (self.processor)(
                                                 GathererHandle {
                                                     gatherer: &self,
