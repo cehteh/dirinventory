@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::fmt::{Debug, Formatter, Result};
 
 use crate::*;
 
@@ -42,7 +41,7 @@ impl DirectoryGatherMessage {
 
 /// Messages on the output queue, collected entries, 'Done' when the queue becomes empty and
 /// errors passed up
-//#[derive(Debug)] FIXME: openat::Metadata is not Debug
+#[derive(Debug)]
 pub enum InventoryEntryMessage {
     /// Passes the path and lightweight data from an openat::Entry, no stat() calls are needed.
     Entry {
@@ -78,19 +77,6 @@ pub enum InventoryEntryMessage {
     /// data.
     Done,
     //    Shutdown
-}
-
-impl Debug for InventoryEntryMessage {
-    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
-        use InventoryEntryMessage::*;
-        match self {
-            Entry { path, .. } => write!(f, "Entry {:?}", path.to_pathbuf()),
-            Metadata { path, .. } => write!(f, "Metadata {:?}", path.to_pathbuf()),
-            EndOfDirectory { path, .. } => write!(f, "EndOfDirectory {:?}", path.to_pathbuf()),
-            Err { path, error, .. } => write!(f, "Error {:?} at {:?}", error, path.to_pathbuf()),
-            Done => write!(f, "Done"),
-        }
-    }
 }
 
 impl InventoryEntryMessage {

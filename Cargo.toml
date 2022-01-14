@@ -12,7 +12,7 @@ documentation = "http://docs.rs/dirinventory"
 edition = "2021"
 
 [dependencies]
-openat_ct = "0.2.0-pre4"
+openat_ct = "0.2.0-pre5"
 log = "0.4"
 crossbeam-channel = "0.5"
 parking_lot = "0.11"
