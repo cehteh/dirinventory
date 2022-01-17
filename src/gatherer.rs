@@ -23,11 +23,11 @@ pub type ProcessFn = dyn Fn(GathererHandle, ProcessEntry, Option<Arc<Dir>>) + Se
 /// desired actions.
 pub enum ProcessEntry {
     /// Either an entry in the filesystem or an error.
-    Result(io::Result<openat::Entry>, Arc<ObjectPath>),
+    Result(io::Result<openat::Entry>, ObjectPath),
     /// The ProcessFn is called with this after all entries of an directory are processed (but
     /// not its subdirectories). This is used to notify that no more entries of the saied
     /// directory are to be expected.
-    EndOfDirectory(Arc<ObjectPath>),
+    EndOfDirectory(ObjectPath),
 }
 
 type GathererStash<'a> = Stash<'a, DirectoryGatherMessage, u64>;
@@ -91,7 +91,7 @@ impl Gatherer {
 
     /// Adds a directory to the processing queue of the inventory. This is the main function
     /// to initiate a directory traversal.
-    pub fn load_dir_recursive(&self, path: Arc<ObjectPath>) {
+    pub fn load_dir_recursive(&self, path: ObjectPath) {
         let mut stash = self.kickoff_stash.lock();
         self.send_dir(
             DirectoryGatherMessage::new_dir(path),
@@ -389,15 +389,17 @@ pub struct GathererHandle<'a> {
 }
 
 impl GathererHandle<'_> {
-    /// Add a sub directory to the input priority queue to be traversed as well.
+    /// Add a (sub-) directory to the input priority queue to be traversed as well.
+    /// This must be a directory, otherwise it panics.
     pub fn traverse_dir(
         &self,
         entry: &openat::Entry,
-        parent_path: Arc<ObjectPath>,
+        parent_path: ObjectPath,
         parent_dir: Option<Arc<Dir>>,
     ) {
-        let subdir = ObjectPath::subobject(
-            parent_path,
+        assert!(matches!(entry.simple_type(), Some(openat::SimpleType::Dir)));
+        let subdir = ObjectPath::sub_directory(
+            &parent_path,
             self.gatherer.names.interning(entry.file_name()),
         );
 
@@ -420,15 +422,14 @@ impl GathererHandle<'_> {
     /// Sends openat::Entry components to the output channel. 'channel' can be any number as send wraps
     /// it by modulo the real number of channels. This allows to use any usize hash or
     /// otherwise large number.
-    pub fn output_entry(
-        &self,
-        channel: usize,
-        entry: &openat::Entry,
-        parent_path: Arc<ObjectPath>,
-    ) {
-        let path = ObjectPath::subobject(
-            parent_path,
+    pub fn output_entry(&self, channel: usize, entry: &openat::Entry, parent_path: ObjectPath) {
+        let path = ObjectPath::sub_object(
+            &parent_path,
             self.gatherer.names.interning(entry.file_name()),
+            entry
+                .simple_type()
+                .map(|t| t == openat::SimpleType::Dir)
+                .unwrap_or(false),
         );
         self.gatherer
             .send_entry(channel, InventoryEntryMessage::Entry {
@@ -445,12 +446,16 @@ impl GathererHandle<'_> {
         &self,
         channel: usize,
         entry: &openat::Entry,
-        parent_path: Arc<ObjectPath>,
+        parent_path: ObjectPath,
         metadata: openat::Metadata,
     ) {
-        let entryname = ObjectPath::subobject(
-            parent_path,
+        let entryname = ObjectPath::sub_object(
+            &parent_path,
             self.gatherer.names.interning(entry.file_name()),
+            entry
+                .simple_type()
+                .map(|t| t == openat::SimpleType::Dir)
+                .unwrap_or(false),
         );
         self.gatherer
             .send_entry(channel, InventoryEntryMessage::Metadata {
@@ -462,7 +467,7 @@ impl GathererHandle<'_> {
     /// Sends an error to the output channel.  'channel' can be any number as send wraps
     /// it by modulo the real number of channels. This allows to use any usize hash or
     /// otherwise large number.
-    pub fn output_error(&self, channel: usize, error: DynError, path: Arc<ObjectPath>) {
+    pub fn output_error(&self, channel: usize, error: DynError, path: ObjectPath) {
         warn!("{:?} at {:?}", error, path);
         self.gatherer
             .send_entry(channel, InventoryEntryMessage::Err { path, error });
