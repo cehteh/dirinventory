@@ -2,6 +2,7 @@
 #![warn(missing_docs)]
 #![warn(rustdoc::missing_crate_level_docs)]
 #![feature(hash_set_entry)]
+#![feature(once_cell)]
 
 mod gatherer;
 pub use gatherer::{Gatherer, GathererBuilder, GathererHandle, ProcessEntry, ProcessFn};
@@ -33,6 +34,8 @@ mod test {
     use std::io::Write;
     use std::sync::Once;
 
+    #[allow(unused_imports)]
+    pub use log::{debug, error, info, trace, warn};
     use env_logger;
 
     pub fn init_env_logging() {
@@ -62,5 +65,11 @@ mod test {
                 .try_init()
                 .unwrap();
         });
+    }
+
+    #[test]
+    fn smoke() {
+        crate::test::init_env_logging();
+        info!("logging works");
     }
 }

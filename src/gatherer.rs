@@ -23,11 +23,11 @@ pub type ProcessFn = dyn Fn(GathererHandle, ProcessEntry, Option<Arc<Dir>>) + Se
 /// desired actions.
 pub enum ProcessEntry {
     /// Either an entry in the filesystem or an error.
-    Result(io::Result<openat::Entry>, ObjectPath),
+    Result(io::Result<openat::Entry>, ObjectPath<()>),
     /// The ProcessFn is called with this after all entries of an directory are processed (but
     /// not its subdirectories). This is used to notify that no more entries of the saied
     /// directory are to be expected.
-    EndOfDirectory(ObjectPath),
+    EndOfDirectory(ObjectPath<()>),
 }
 
 type GathererStash<'a> = Stash<'a, DirectoryGatherMessage, u64>;
@@ -91,7 +91,7 @@ impl Gatherer {
 
     /// Adds a directory to the processing queue of the inventory. This is the main function
     /// to initiate a directory traversal.
-    pub fn load_dir_recursive(&self, path: ObjectPath) {
+    pub fn load_dir_recursive(&self, path: ObjectPath<()>) {
         let mut stash = self.kickoff_stash.lock();
         self.send_dir(
             DirectoryGatherMessage::new_dir(path),
@@ -166,7 +166,10 @@ impl Gatherer {
                                         path.to_pathbuf(),
                                         path.depth()
                                     );
+
                                     let dir = Arc::new(dir);
+                                    // Clone the path to increment the refcount to trigger notification reliably
+                                    let path = path.clone();
                                     dir.list_self()
                                         .map(|dir_iter| {
                                             dir_iter.for_each(|entry| {
@@ -394,7 +397,7 @@ impl GathererHandle<'_> {
     pub fn traverse_dir(
         &self,
         entry: &openat::Entry,
-        parent_path: ObjectPath,
+        parent_path: ObjectPath<()>,
         parent_dir: Option<Arc<Dir>>,
     ) {
         assert!(matches!(entry.simple_type(), Some(openat::SimpleType::Dir)));
@@ -422,7 +425,7 @@ impl GathererHandle<'_> {
     /// Sends openat::Entry components to the output channel. 'channel' can be any number as send wraps
     /// it by modulo the real number of channels. This allows to use any usize hash or
     /// otherwise large number.
-    pub fn output_entry(&self, channel: usize, entry: &openat::Entry, parent_path: ObjectPath) {
+    pub fn output_entry(&self, channel: usize, entry: &openat::Entry, parent_path: ObjectPath<()>) {
         let path = ObjectPath::sub_object(
             &parent_path,
             self.gatherer.names.interning(entry.file_name()),
@@ -446,7 +449,7 @@ impl GathererHandle<'_> {
         &self,
         channel: usize,
         entry: &openat::Entry,
-        parent_path: ObjectPath,
+        parent_path: ObjectPath<()>,
         metadata: openat::Metadata,
     ) {
         let entryname = ObjectPath::sub_object(
@@ -467,7 +470,7 @@ impl GathererHandle<'_> {
     /// Sends an error to the output channel.  'channel' can be any number as send wraps
     /// it by modulo the real number of channels. This allows to use any usize hash or
     /// otherwise large number.
-    pub fn output_error(&self, channel: usize, error: DynError, path: ObjectPath) {
+    pub fn output_error(&self, channel: usize, error: DynError, path: ObjectPath<()>) {
         warn!("{:?} at {:?}", error, path);
         self.gatherer
             .send_entry(channel, InventoryEntryMessage::Err { path, error });
