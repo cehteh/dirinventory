@@ -11,7 +11,7 @@ mod messages;
 pub use messages::{DirectoryGatherMessage, InventoryEntryMessage};
 
 mod objectpath;
-pub use objectpath::ObjectPath;
+pub use objectpath::{DropNotify, ObjectPath};
 
 mod internednames;
 pub use internednames::{InternedName, InternedNames};

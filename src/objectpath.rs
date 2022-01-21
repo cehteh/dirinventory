@@ -145,10 +145,13 @@ impl<D: DropNotify> Drop for ObjectPath<D> {
     }
 }
 
-pub trait DropNotify {
+/// Helper to implement the drop notification when a ObjectPath becomes unused.
+pub trait DropNotify: 'static + Send + Sync {
+    /// Associated function that becomes called with the path thats going to be dropped.
     fn notify<D: DropNotify>(path: &mut ObjectPath<D>);
 }
 
+/// The unit type () ignores drop notificaitons. A gatherer can be contructed with this to supress them.
 impl DropNotify for () {
     fn notify<D: DropNotify>(_path: &mut ObjectPath<D>) {
         // nothing for <()>

@@ -4,12 +4,12 @@ use crate::*;
 
 /// Messages on the input queue, directories to be processed.
 #[derive(Debug)]
-pub enum DirectoryGatherMessage {
+pub enum DirectoryGatherMessage<D: DropNotify> {
     /// Path and parent handle of a directory to be traversed. The handle to the directory
     /// itself will be opened by the thread processing it.
     TraverseDirectory {
         /// The path to the Object
-        path:       ObjectPath<()>,
+        path:       ObjectPath<D>,
         /// Optional handle to the parent directory
         parent_dir: Option<Arc<Dir>>,
     },
@@ -17,9 +17,9 @@ pub enum DirectoryGatherMessage {
     // Shutdown,
 }
 
-impl DirectoryGatherMessage {
+impl<D: DropNotify> DirectoryGatherMessage<D> {
     /// Create a new 'TraverseDirectory' message.
-    pub fn new_dir(path: ObjectPath<()>) -> Self {
+    pub fn new_dir(path: ObjectPath<D>) -> Self {
         DirectoryGatherMessage::TraverseDirectory {
             path,
             parent_dir: None,
@@ -42,11 +42,11 @@ impl DirectoryGatherMessage {
 /// Messages on the output queue, collected entries, 'Done' when the queue becomes empty and
 /// errors passed up
 #[derive(Debug)]
-pub enum InventoryEntryMessage {
+pub enum InventoryEntryMessage<D: DropNotify> {
     /// Passes the path and lightweight data from an openat::Entry, no stat() calls are needed.
     Entry {
         /// Filename of this entry.
-        path:      ObjectPath<()>,
+        path:      ObjectPath<D>,
         /// Type of file.
         file_type: Option<openat::SimpleType>,
         /// Inode number.
@@ -56,7 +56,7 @@ pub enum InventoryEntryMessage {
     /// involve costly stat() calls.
     Metadata {
         /// Filename of this entry.
-        path:     ObjectPath<()>,
+        path:     ObjectPath<D>,
         /// Metadata for this entry.
         metadata: openat::Metadata,
     },
@@ -64,12 +64,12 @@ pub enum InventoryEntryMessage {
     /// output know that no more data for this directory will be send.
     EndOfDirectory {
         /// Filename of this entry.
-        path: ObjectPath<()>,
+        path: ObjectPath<D>,
     },
     /// The Gaterers only pass errors up but try to continue.
     Err {
         /// Filename of this entry.
-        path:  ObjectPath<()>,
+        path:  ObjectPath<D>,
         /// The error.
         error: DynError,
     },
@@ -79,9 +79,9 @@ pub enum InventoryEntryMessage {
     //    Shutdown
 }
 
-impl InventoryEntryMessage {
+impl<D: DropNotify> InventoryEntryMessage<D> {
     /// Returns the path of an message if present
-    pub fn path(&self) -> Option<&ObjectPath<()>> {
+    pub fn path(&self) -> Option<&ObjectPath<D>> {
         use InventoryEntryMessage::*;
         match self {
             Entry { path, .. } => Some(path),
