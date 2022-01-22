@@ -4,7 +4,6 @@ use std::io;
 use std::sync::Arc;
 use std::thread;
 use std::ops::DerefMut;
-use std::marker::PhantomData;
 
 use mpmcpq::*;
 use crossbeam_channel::{bounded, Receiver, Sender};
@@ -18,45 +17,47 @@ use crate::*;
 /// which defines the API for pushing things back on the Gatherers queues, the raw
 /// openat::Entry to be processed, an object to the path of the parent directory and the Dir
 /// handle of the parent dir.
-pub type ProcessFn<D> = dyn Fn(GathererHandle<D>, ProcessEntry<D>, Option<Arc<Dir>>) + Send + Sync;
+pub type ProcessFn = dyn Fn(GathererHandle, ProcessEntry, Option<Arc<Dir>>) + Send + Sync;
 
 /// The ProcessFn is called with this as parameter. It shall match on this and implement the
 /// desired actions.
-pub enum ProcessEntry<D: DropNotify> {
+pub enum ProcessEntry {
     /// Either an entry in the filesystem or an error.
-    Result(io::Result<openat::Entry>, ObjectPath<D>),
+    Result(io::Result<openat::Entry>, ObjectPath),
+    /// Got a notification that a ObjectPath processing finished.
+    ObjectDone(ObjectPath),
     /// The ProcessFn is called with this after all entries of an directory are processed (but
     /// not its subdirectories). This is used to notify that no more entries of the saied
     /// directory are to be expected.
-    EndOfDirectory(ObjectPath<D>),
+    EndOfDirectory(ObjectPath),
 }
 
-type GathererStash<'a, D> = Stash<'a, DirectoryGatherMessage<D>, u64>;
+type GathererStash<'a> = Stash<'a, DirectoryGatherMessage, u64>;
 
 /// Create a space efficient store for file metadata of files larger than a certain
 /// min_blocksize.  This is used to find whcih files to delete first for most space efficient
 /// deletion.  There should be only one 'Gatherer' around as it is used to merge hardlinks
 /// and needs to have a global picture of all indexed files.
-pub struct Gatherer<D: DropNotify> {
+pub struct Gatherer {
     /// All file/dir names are interned here
     names: InternedNames<32>,
 
     /// The processing function
-    processor: Box<ProcessFn<D>>,
+    processor: Box<ProcessFn>,
 
     // message queues
     /// The input PriorityQueue fed with directories to be processed
-    dirs_queue:      PriorityQueue<DirectoryGatherMessage<D>, u64>,
+    dirs_queue:      PriorityQueue<DirectoryGatherMessage, u64>,
     /// The output channels where the results are send to.
     #[allow(clippy::type_complexity)]
     output_channels: Vec<(
-        Sender<InventoryEntryMessage<D>>,
-        Arc<Receiver<InventoryEntryMessage<D>>>,
+        Sender<InventoryEntryMessage>,
+        Arc<Receiver<InventoryEntryMessage>>,
     )>,
 
     /// Sending an initial directory requires an stash.
     // PLANNED: Also used when one wants to push multiple directories.
-    kickoff_stash: Mutex<GathererStash<'static, D>>,
+    kickoff_stash: Mutex<GathererStash<'static>>,
 
     /// The maximum number of file descriptors this Gatherer may use.
     fd_limit: usize,
@@ -65,26 +66,26 @@ pub struct Gatherer<D: DropNotify> {
     message_batch: usize,
 }
 
-impl<D: DropNotify> Gatherer<D> {
+impl Gatherer {
     /// Creates a gatherer builder used to configure the gatherer. Uses conservative defaults,
     /// 16 threads and 64k backlog.
     #[must_use = "configure the Gatherer and finally call .start()"]
-    pub fn build() -> GathererBuilder<D> {
+    pub fn build() -> GathererBuilder {
         GathererBuilder::new()
     }
 
     /// Returns the an Arc of the receiver side of output channel 'n'.
-    pub fn channel(&self, n: usize) -> Arc<Receiver<InventoryEntryMessage<D>>> {
+    pub fn channel(&self, n: usize) -> Arc<Receiver<InventoryEntryMessage>> {
         self.output_channels[n].1.clone()
     }
 
     /// Returns the number of output channels.
     pub fn num_channels(&self) -> usize {
-        self.output_channels.len()
+        self.output_channels.len() as usize
     }
 
     /// Returns a Vec with all receiving sides of the output channels.
-    pub fn channels_as_vec(&self) -> Vec<Arc<Receiver<InventoryEntryMessage<D>>>> {
+    pub fn channels_as_vec(&self) -> Vec<Arc<Receiver<InventoryEntryMessage>>> {
         self.output_channels
             .iter()
             .map(|(_, r)| r.clone())
@@ -93,13 +94,13 @@ impl<D: DropNotify> Gatherer<D> {
 
     /// Adds a directory to the processing queue of the inventory. This is the main function
     /// to initiate a directory traversal.
-    pub fn load_dir_recursive(&self, path: ObjectPath<D>) {
+    pub fn load_dir_recursive(&self, path: ObjectPath) {
         let mut stash = self.kickoff_stash.lock();
         self.send_dir(
-            DirectoryGatherMessage::<D>::new_dir(path),
+            DirectoryGatherMessage::new_dir(path),
             u64::MAX, /* initial message priority instead depth/inode calculation, added
                        * directories are processed at the lowest priority */
-            stash.deref_mut(),
+            Some(stash.deref_mut()),
         );
         self.dirs_queue.sync(stash.deref_mut());
     }
@@ -107,15 +108,25 @@ impl<D: DropNotify> Gatherer<D> {
     // TODO: fn shutdown, there is currently no way to free a Gatherer as the threads keep it alive
 
     /// put a DirectoryGatherMessage on the input queue (traverse sub directories).
-    fn send_dir(&self, message: DirectoryGatherMessage<D>, prio: u64, stash: &GathererStash<D>) {
-        self.dirs_queue
-            .send_batched(message, prio, self.message_batch, stash);
+    fn send_dir(&self, message: DirectoryGatherMessage, prio: u64, stash: Option<&GathererStash>) {
+        if let Some(stash) = stash {
+            self.dirs_queue
+                .send_batched(message, prio, self.message_batch, stash);
+        } else {
+            self.dirs_queue.send_nostash(message, prio);
+        }
+    }
+
+    // resend a dir after 5ms pause to recover from filehandle depletion
+    fn resend_dir(&self, message: DirectoryGatherMessage, prio: u64, stash: &GathererStash) {
+        self.send_dir(message, prio, Some(stash));
+        thread::sleep(std::time::Duration::from_millis(5));
     }
 
     /// Put a message on an output channel. The channels are used modulo the
     /// output_channels.len(), thus can never overflow and a user may use a hash/larger number
     /// than available.
-    fn send_entry(&self, channel: usize, message: InventoryEntryMessage<D>) {
+    fn send_entry(&self, channel: usize, message: InventoryEntryMessage) {
         // Ignore result, the user may have dropped the receiver, but there is nothing we
         // should do about it.
         let _ = unsafe {
@@ -126,9 +137,18 @@ impl<D: DropNotify> Gatherer<D> {
         };
     }
 
-    fn resend_dir(&self, message: DirectoryGatherMessage<D>, prio: u64, stash: &GathererStash<D>) {
-        self.send_dir(message, prio, stash);
-        thread::sleep(std::time::Duration::from_millis(5));
+    /// called when a watched ObjectPath's strong_count becomes dropped equal or below 2.
+    pub(crate) fn notify_path_dropped(&self, path: ObjectPath) {
+        trace!("got notified: {:?}", path);
+        (self.processor)(
+            GathererHandle {
+                // infallible since caller checked already
+                gatherer: &path.gatherer().unwrap(),
+                stash:    None,
+            },
+            ProcessEntry::ObjectDone(path),
+            None,
+        );
     }
 
     /// Spawns a single gatherer thread
@@ -137,7 +157,7 @@ impl<D: DropNotify> Gatherer<D> {
             .name(format!("gather/{}", n))
             .spawn(move || {
                 debug!("thread started: {}", thread::current().name().unwrap());
-                let stash: GathererStash<D> = Stash::new(&self.dirs_queue);
+                let stash: GathererStash = Stash::new(&self.dirs_queue);
                 loop {
                     use DirectoryGatherMessage::*;
 
@@ -176,7 +196,7 @@ impl<D: DropNotify> Gatherer<D> {
                                                 (self.processor)(
                                                     GathererHandle {
                                                         gatherer: &self,
-                                                        stash:    &stash,
+                                                        stash:    Some(&stash),
                                                     },
                                                     ProcessEntry::Result(entry, path.clone()),
                                                     Some(dir.clone()),
@@ -186,16 +206,10 @@ impl<D: DropNotify> Gatherer<D> {
                                             (self.processor)(
                                                 GathererHandle {
                                                     gatherer: &self,
-                                                    stash:    &stash,
+                                                    stash:    Some(&stash),
                                                 },
                                                 ProcessEntry::EndOfDirectory(path.clone()),
                                                 Some(dir.clone()),
-                                            );
-
-                                            let _ = self.output_channels[0].0.send(
-                                                InventoryEntryMessage::EndOfDirectory {
-                                                    path: path.clone(),
-                                                },
                                             );
 
                                             self.dirs_queue.sync(&stash);
@@ -215,7 +229,7 @@ impl<D: DropNotify> Gatherer<D> {
                                                 (self.processor)(
                                                     GathererHandle {
                                                         gatherer: &self,
-                                                        stash:    &stash,
+                                                        stash:    Some(&stash),
                                                     },
                                                     ProcessEntry::Result(Err(err), path.clone()),
                                                     Some(dir),
@@ -238,7 +252,7 @@ impl<D: DropNotify> Gatherer<D> {
                                         (self.processor)(
                                             GathererHandle {
                                                 gatherer: &self,
-                                                stash:    &stash,
+                                                stash:    Some(&stash),
                                             },
                                             ProcessEntry::Result(Err(err), path.clone()),
                                             parent_dir.clone(),
@@ -261,22 +275,21 @@ impl<D: DropNotify> Gatherer<D> {
 }
 
 /// Configures a Gatherer
-pub struct GathererBuilder<D: DropNotify> {
+pub struct GathererBuilder {
     num_gather_threads:  usize,
     num_output_channels: usize,
     inventory_backlog:   usize,
     fd_limit:            usize,
     message_batch:       usize,
-    _phantom:            PhantomData<D>,
 }
 
-impl<D: DropNotify> Default for GathererBuilder<D> {
+impl Default for GathererBuilder {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<D: DropNotify> GathererBuilder<D> {
+impl GathererBuilder {
     fn new() -> Self {
         GathererBuilder {
             num_gather_threads:  16,
@@ -284,7 +297,6 @@ impl<D: DropNotify> GathererBuilder<D> {
             inventory_backlog:   0,
             fd_limit:            512,
             message_batch:       512,
-            _phantom:            PhantomData,
         }
     }
 
@@ -292,7 +304,7 @@ impl<D: DropNotify> GathererBuilder<D> {
     /// function is used to process every directory entry seen. It should be small and fast
     /// selecting which sub directories to be traversed and which entries to pass to the
     /// output channels. Any more work should be done on the output then.
-    pub fn start(&self, processor: Box<ProcessFn<D>>) -> io::Result<Arc<Gatherer<D>>> {
+    pub fn start(&self, processor: Box<ProcessFn>) -> io::Result<Arc<Gatherer>> {
         let output_channels = (0..self.num_output_channels)
             .map(|_| {
                 let (sender, receiver) = bounded(
@@ -388,24 +400,25 @@ impl<D: DropNotify> GathererBuilder<D> {
 
 /// Defines the API the user defined ProcessFn may use to send data back on the
 /// input queue and output channels.
-pub struct GathererHandle<'a, D: DropNotify> {
-    gatherer: &'a Gatherer<D>,
-    stash:    &'a GathererStash<'a, D>,
+pub struct GathererHandle<'a> {
+    gatherer: &'a Arc<Gatherer>,
+    stash:    Option<&'a GathererStash<'a>>,
 }
 
-impl<D: DropNotify> GathererHandle<'_, D> {
+impl GathererHandle<'_> {
     /// Add a (sub-) directory to the input priority queue to be traversed as well.
     /// This must be a directory, otherwise it panics.
     pub fn traverse_dir(
         &self,
         entry: &openat::Entry,
-        parent_path: ObjectPath<D>,
+        parent_path: ObjectPath,
         parent_dir: Option<Arc<Dir>>,
     ) {
         assert!(matches!(entry.simple_type(), Some(openat::SimpleType::Dir)));
-        let subdir = ObjectPath::sub_directory(
+        let subdir = ObjectPath::sub_object(
             &parent_path,
             self.gatherer.names.interning(entry.file_name()),
+            Arc::downgrade(self.gatherer),
         );
 
         // The Order of directory traversal is defined by the 64bit priority in the
@@ -427,14 +440,11 @@ impl<D: DropNotify> GathererHandle<'_, D> {
     /// Sends openat::Entry components to the output channel. 'channel' can be any number as send wraps
     /// it by modulo the real number of channels. This allows to use any usize hash or
     /// otherwise large number.
-    pub fn output_entry(&self, channel: usize, entry: &openat::Entry, parent_path: ObjectPath<D>) {
+    pub fn output_entry(&self, channel: usize, entry: &openat::Entry, parent_path: ObjectPath) {
         let path = ObjectPath::sub_object(
             &parent_path,
             self.gatherer.names.interning(entry.file_name()),
-            entry
-                .simple_type()
-                .map(|t| t == openat::SimpleType::Dir)
-                .unwrap_or(false),
+            Arc::downgrade(self.gatherer),
         );
         self.gatherer
             .send_entry(channel, InventoryEntryMessage::Entry {
@@ -451,16 +461,13 @@ impl<D: DropNotify> GathererHandle<'_, D> {
         &self,
         channel: usize,
         entry: &openat::Entry,
-        parent_path: ObjectPath<D>,
+        parent_path: ObjectPath,
         metadata: openat::Metadata,
     ) {
         let entryname = ObjectPath::sub_object(
             &parent_path,
             self.gatherer.names.interning(entry.file_name()),
-            entry
-                .simple_type()
-                .map(|t| t == openat::SimpleType::Dir)
-                .unwrap_or(false),
+            Arc::downgrade(self.gatherer),
         );
         self.gatherer
             .send_entry(channel, InventoryEntryMessage::Metadata {
@@ -472,7 +479,7 @@ impl<D: DropNotify> GathererHandle<'_, D> {
     /// Sends an error to the output channel.  'channel' can be any number as send wraps
     /// it by modulo the real number of channels. This allows to use any usize hash or
     /// otherwise large number.
-    pub fn output_error(&self, channel: usize, error: DynError, path: ObjectPath<D>) {
+    pub fn output_error(&self, channel: usize, error: DynError, path: ObjectPath) {
         warn!("{:?} at {:?}", error, path);
         self.gatherer
             .send_entry(channel, InventoryEntryMessage::Err { path, error });
@@ -493,13 +500,9 @@ mod test {
     #[test]
     fn smoke() {
         crate::test::init_env_logging();
-        let _ = Gatherer::<()>::build()
-            .with_gather_threads(1)
-            .start(Box::new(
-                |_gatherer: GathererHandle<_>,
-                 _entry: ProcessEntry<_>,
-                 _parent_dir: Option<Arc<Dir>>| {},
-            ));
+        let _ = Gatherer::build().with_gather_threads(1).start(Box::new(
+            |_gatherer: GathererHandle, _entry: ProcessEntry, _parent_dir: Option<Arc<Dir>>| {},
+        ));
     }
 
     #[test]
@@ -507,13 +510,11 @@ mod test {
     fn load_dir() {
         crate::test::init_env_logging();
 
-        let gatherer = Gatherer::<()>::build()
+        let gatherer = Gatherer::build()
             .with_gather_threads(64)
             .with_fd_limit(768)
             .start(Box::new(
-                |gatherer: GathererHandle<_>,
-                 entry: ProcessEntry<_>,
-                 parent_dir: Option<Arc<Dir>>| {
+                |gatherer: GathererHandle, entry: ProcessEntry, parent_dir: Option<Arc<Dir>>| {
                     match entry {
                         ProcessEntry::Result(Ok(entry), parent_path) => match entry.simple_type() {
                             Some(openat::SimpleType::Dir) => {
@@ -537,7 +538,7 @@ mod test {
             ))
             .unwrap();
 
-        gatherer.load_dir_recursive(ObjectPath::new("."));
+        gatherer.load_dir_recursive(ObjectPath::new(".", Arc::downgrade(&gatherer))); //TODO: pass only &str
 
         let mut stdout = std::io::stdout();
 
@@ -559,11 +560,9 @@ mod test {
     fn entry_messages() {
         crate::test::init_env_logging();
 
-        let gatherer = Gatherer::<()>::build()
+        let gatherer = Gatherer::build()
             .start(Box::new(
-                |gatherer: GathererHandle<_>,
-                 entry: ProcessEntry<_>,
-                 parent_dir: Option<Arc<Dir>>| {
+                |gatherer: GathererHandle, entry: ProcessEntry, parent_dir: Option<Arc<Dir>>| {
                     match entry {
                         ProcessEntry::Result(Ok(entry), parent_path) => match entry.simple_type() {
                             Some(openat::SimpleType::Dir) => {
@@ -582,7 +581,7 @@ mod test {
             ))
             .unwrap();
 
-        gatherer.load_dir_recursive(ObjectPath::new("src"));
+        gatherer.load_dir_recursive(ObjectPath::new("src", Arc::downgrade(&gatherer)));
 
         let mut stdout = std::io::stdout();
 
@@ -602,11 +601,9 @@ mod test {
     fn metadata_messages() {
         crate::test::init_env_logging();
 
-        let gatherer = Gatherer::<()>::build()
+        let gatherer = Gatherer::build()
             .start(Box::new(
-                |gatherer: GathererHandle<_>,
-                 entry: ProcessEntry<_>,
-                 parent_dir: Option<Arc<Dir>>| {
+                |gatherer: GathererHandle, entry: ProcessEntry, parent_dir: Option<Arc<Dir>>| {
                     match entry {
                         ProcessEntry::Result(Ok(entry), parent_path) => match entry.simple_type() {
                             Some(openat::SimpleType::Dir) => {
@@ -629,7 +626,7 @@ mod test {
                 },
             ))
             .unwrap();
-        gatherer.load_dir_recursive(ObjectPath::new("src"));
+        gatherer.load_dir_recursive(ObjectPath::new("src", Arc::downgrade(&gatherer)));
 
         let mut stdout = std::io::stdout();
 

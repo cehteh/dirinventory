@@ -17,7 +17,7 @@ log = "0.4"
 crossbeam-channel = "0.5"
 parking_lot = "0.11"
 libc = "0.2"
-mpmcpq = "0.6"
+mpmcpq = "0.7"
 derivative = "2.2"
 
 [dev-dependencies]

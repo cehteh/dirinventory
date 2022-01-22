@@ -1,60 +1,42 @@
 use std::path::{Path, PathBuf};
 use std::ffi::OsStr;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::sync::atomic::{self, AtomicBool};
-use std::marker::PhantomData;
 
 #[allow(unused_imports)]
 pub use log::{debug, error, info, trace, warn};
 use derivative::Derivative;
 
-use crate::InternedName;
+use crate::{Gatherer, InternedName};
 
 /// Space efficient storage of paths. Instead storing full path-names it stores only interned
 /// strings of the actual object names and a reference to its parent. ObjectPaths are reference counted.
 #[derive(Derivative)]
 #[derivative(Hash, PartialOrd, PartialEq, Ord, Eq)]
-pub struct ObjectPath<D: DropNotify>(Arc<ObjectPathInner<D>>, PhantomData<D>);
+pub struct ObjectPath(Arc<ObjectPathInner>);
 
-impl<D: DropNotify> ObjectPath<D> {
-    /// Creates a new ObjectPath without a parent. The user must supply 'watched = true' when
-    /// this object shall generate a notification when it becomes dropped.
-    pub fn new_object<P: AsRef<Path>>(path: P, watched: bool) -> ObjectPath<D> {
-        ObjectPath(
-            Arc::new(ObjectPathInner {
-                parent:  None,
-                name:    InternedName::new(path.as_ref().as_os_str()),
-                watched: AtomicBool::new(watched),
-            }),
-            PhantomData,
-        )
-    }
-
-    /// Creates a new ObjectPath without a parent and watching enabled.
-    pub fn new<P: AsRef<Path>>(path: P) -> ObjectPath<D> {
-        ObjectPath::new_object(path, true)
+impl ObjectPath {
+    /// Creates a new ObjectPath without a parent.
+    pub fn new<P: AsRef<Path>>(path: P, gatherer: Weak<Gatherer>) -> ObjectPath {
+        ObjectPath(Arc::new(ObjectPathInner {
+            parent: None,
+            name: InternedName::new(path.as_ref().as_os_str()),
+            gatherer,
+            watched: AtomicBool::new(false),
+        }))
     }
 
     /// Creates a new ObjectPath as sub-object to some existing ObjectPath object.  The user
     /// must supply 'watched = true' when this object shall generate a notification when it
     /// becomes dropped.
     #[must_use]
-    pub fn sub_object(&self, name: InternedName, watched: bool) -> ObjectPath<D> {
-        ObjectPath(
-            Arc::new(ObjectPathInner {
-                parent: Some(self.clone()),
-                name,
-                watched: AtomicBool::new(watched),
-            }),
-            PhantomData,
-        )
-    }
-
-    /// Creates a new ObjectPath as sub object to some existing ObjectPath object with
-    /// watching enabled.
-    #[must_use]
-    pub fn sub_directory(&self, name: InternedName) -> ObjectPath<D> {
-        self.sub_object(name, true)
+    pub fn sub_object(&self, name: InternedName, gatherer: Weak<Gatherer>) -> ObjectPath {
+        ObjectPath(Arc::new(ObjectPathInner {
+            parent: Some(self.clone()),
+            name,
+            gatherer,
+            watched: AtomicBool::new(false),
+        }))
     }
 
     fn pathbuf_push_parents(&self, target: &mut PathBuf, len: usize) {
@@ -124,15 +106,26 @@ impl<D: DropNotify> ObjectPath<D> {
     pub fn strong_count(&self) -> usize {
         Arc::strong_count(&self.0)
     }
-}
 
-impl<D: DropNotify> Clone for ObjectPath<D> {
-    fn clone(&self) -> Self {
-        ObjectPath(self.0.clone(), PhantomData)
+    /// Enables watching on this ObjectPath, whenever all processing handles get dropped a
+    /// notification is issued.
+    pub fn watch(&self) {
+        self.0.watched.store(true, atomic::Ordering::Relaxed);
+    }
+
+    /// Returns am Arc handle to the Gatherer if available
+    pub fn gatherer(&self) -> Option<Arc<Gatherer>> {
+        self.0.gatherer.upgrade()
     }
 }
 
-impl<D: DropNotify> Drop for ObjectPath<D> {
+impl Clone for ObjectPath {
+    fn clone(&self) -> Self {
+        ObjectPath(self.0.clone())
+    }
+}
+
+impl Drop for ObjectPath {
     fn drop(&mut self) {
         // Ordering::Relaxed suffices here because the last reference is always the gatherer
         // itself (which starts with two references). The gatherer will never increase the
@@ -140,40 +133,38 @@ impl<D: DropNotify> Drop for ObjectPath<D> {
         // clone the path without retriggering the notifier. 2 because this is the refcount
         // before this drop happend.
         if self.strong_count() <= 2 && self.0.watched.swap(false, atomic::Ordering::Relaxed) {
-            D::notify(self);
+            if let Some(gatherer) = self.gatherer() {
+                gatherer.notify_path_dropped(self.clone());
+            }
         }
-    }
-}
-
-/// Helper to implement the drop notification when a ObjectPath becomes unused.
-pub trait DropNotify: 'static + Send + Sync {
-    /// Associated function that becomes called with the path thats going to be dropped.
-    fn notify<D: DropNotify>(path: &mut ObjectPath<D>);
-}
-
-/// The unit type () ignores drop notificaitons. A gatherer can be contructed with this to supress them.
-impl DropNotify for () {
-    fn notify<D: DropNotify>(_path: &mut ObjectPath<D>) {
-        // nothing for <()>
     }
 }
 
 #[derive(Derivative)]
 #[derivative(Hash, PartialOrd, PartialEq, Ord, Eq)]
-pub struct ObjectPathInner<D: DropNotify> {
-    parent:  Option<ObjectPath<D>>,
-    name:    InternedName,
+pub struct ObjectPathInner {
+    parent: Option<ObjectPath>,
+    name:   InternedName,
+
+    // PLANNED: include enum MaybeHandle Weak/Strong/None Weak(Weak<Dir>) ...
     #[derivative(
         Hash = "ignore",
         PartialEq = "ignore",
         PartialOrd = "ignore",
         Ord = "ignore"
     )]
-    watched: AtomicBool,
+    gatherer: Weak<Gatherer>,
+    #[derivative(
+        Hash = "ignore",
+        PartialEq = "ignore",
+        PartialOrd = "ignore",
+        Ord = "ignore"
+    )]
+    watched:  AtomicBool,
 }
 
 use std::fmt;
-impl<D: DropNotify> fmt::Debug for ObjectPath<D> {
+impl fmt::Debug for ObjectPath {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{:?}", self.to_pathbuf())
     }
@@ -183,30 +174,31 @@ impl<D: DropNotify> fmt::Debug for ObjectPath<D> {
 mod test {
     use std::path::PathBuf;
     use std::ffi::OsStr;
-    use std::sync::{Mutex, MutexGuard};
-    use std::lazy::SyncOnceCell;
-    use std::sync::atomic;
+    use std::sync::Weak;
 
     #[allow(unused_imports)]
     pub use log::{debug, error, info, trace, warn};
 
     use crate::InternedName;
-    use super::{DropNotify, ObjectPath};
+    use super::ObjectPath;
 
     #[test]
     fn smoke() {
         crate::test::init_env_logging();
-        assert_eq!(ObjectPath::<()>::new(".").to_pathbuf(), PathBuf::from("."));
+        assert_eq!(
+            ObjectPath::new(".", Weak::new()).to_pathbuf(),
+            PathBuf::from(".")
+        );
     }
 
     #[test]
     fn path_subobject() {
         crate::test::init_env_logging();
         use std::ffi::OsStr;
-        let p = ObjectPath::<()>::new(".");
+        let p = ObjectPath::new(".", Weak::new());
         let mut pathbuf = PathBuf::new();
         assert_eq!(
-            p.sub_directory(InternedName::new(OsStr::new("foo")))
+            p.sub_object(InternedName::new(OsStr::new("foo")), Weak::new())
                 .write_pathbuf(&mut pathbuf),
             &PathBuf::from("./foo")
         );
@@ -215,97 +207,22 @@ mod test {
     #[test]
     fn path_ordering() {
         crate::test::init_env_logging();
-        let foo = ObjectPath::<()>::new("foo");
-        let bar = ObjectPath::<()>::new("bar");
+        let foo = ObjectPath::new("foo", Weak::new());
+        let bar = ObjectPath::new("bar", Weak::new());
         assert!(bar < foo);
 
-        let bar2 = ObjectPath::<()>::new("bar");
+        let bar2 = ObjectPath::new("bar", Weak::new());
         assert!(bar == bar2);
 
-        let foobar = foo.sub_directory(InternedName::new(OsStr::new("bar")));
-        let barfoo = bar.sub_directory(InternedName::new(OsStr::new("foo")));
+        let foobar = foo.sub_object(InternedName::new(OsStr::new("bar")), Weak::new());
+        let barfoo = bar.sub_object(InternedName::new(OsStr::new("foo")), Weak::new());
         assert!(barfoo < foobar);
     }
 
     #[test]
     fn metadata() {
         crate::test::init_env_logging();
-        let cargo = ObjectPath::<()>::new("Cargo.toml");
+        let cargo = ObjectPath::new("Cargo.toml", Weak::new());
         assert!(cargo.metadata().is_ok());
-    }
-
-    #[test]
-    fn dropnotify_smoke() {
-        crate::test::init_env_logging();
-        let _cargo = ObjectPath::<()>::new("Cargo.toml");
-    }
-
-    macro_rules! impl_test_notifier {
-        () => {
-            struct TestNotifier;
-
-            impl TestNotifier {
-                fn data() -> MutexGuard<'static, Vec<PathBuf>> {
-                    static LAST_SEEN: SyncOnceCell<Mutex<Vec<PathBuf>>> = SyncOnceCell::new();
-                    LAST_SEEN
-                        .get_or_init(|| Mutex::new(Vec::new()))
-                        .lock()
-                        .unwrap()
-                }
-
-                fn push(path: PathBuf) {
-                    trace!("pushing dropped value: {:?}", path);
-                    Self::data().push(path);
-                }
-            }
-
-            impl DropNotify for TestNotifier {
-                fn notify<D: DropNotify>(path: &mut ObjectPath<D>) {
-                    let last = path.to_pathbuf();
-                    trace!("dropped: {:?}", last);
-                    TestNotifier::push(last);
-                }
-            }
-        };
-    }
-
-    #[test]
-    fn dropnotify_test() {
-        impl_test_notifier!();
-        crate::test::init_env_logging();
-        let cargo = ObjectPath::<TestNotifier>::new("Cargo.toml");
-        trace!("got: {:?}", cargo.to_pathbuf());
-        drop(cargo);
-        assert_eq!(
-            TestNotifier::data().last(),
-            Some(&PathBuf::from("Cargo.toml"))
-        );
-    }
-
-    #[test]
-    fn dropnotify_dropcount() {
-        impl_test_notifier!();
-        crate::test::init_env_logging();
-        let cargo = ObjectPath::<TestNotifier>::new("Cargo.toml");
-        let cargo2 = cargo.clone();
-        let cargo3 = cargo.clone();
-
-        assert_eq!(cargo.0.watched.load(atomic::Ordering::Relaxed), true);
-        assert_eq!(cargo.strong_count(), 3);
-        drop(cargo2);
-
-        assert_eq!(cargo.0.watched.load(atomic::Ordering::Relaxed), true);
-        assert_eq!(cargo.strong_count(), 2);
-        assert_eq!(TestNotifier::data().len(), 0);
-        drop(cargo3);
-
-        assert_eq!(cargo.strong_count(), 1);
-        assert_eq!(cargo.0.watched.load(atomic::Ordering::Relaxed), false);
-        assert_eq!(TestNotifier::data().len(), 1);
-
-        assert_eq!(
-            TestNotifier::data().last(),
-            Some(&PathBuf::from("Cargo.toml"))
-        );
     }
 }

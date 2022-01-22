@@ -11,7 +11,7 @@ mod messages;
 pub use messages::{DirectoryGatherMessage, InventoryEntryMessage};
 
 mod objectpath;
-pub use objectpath::{DropNotify, ObjectPath};
+pub use objectpath::ObjectPath;
 
 mod internednames;
 pub use internednames::{InternedName, InternedNames};
@@ -23,7 +23,7 @@ pub use openat_ct as openat;
 /// An user defined processing function can return any kind of error, this needs to be boxed
 /// and dyn. Since error handling is expected to be the slow path, having the allocation and
 /// vtable here shouldn't be an performance issue.
-pub type DynError = Box<dyn std::error::Error + Send>;
+pub type DynError = Box<dyn std::error::Error + Send + Sync + 'static>;
 /// Typedef for the DynError result.
 pub type DynResult<T> = std::result::Result<T, DynError>;
 
