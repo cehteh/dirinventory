@@ -91,6 +91,9 @@ impl InventoryEntryMessage {
         match self {
             Entry { path, .. } => Some(path),
             Metadata { path, .. } => Some(path),
+            EndOfDirectory { path, .. } => Some(path),
+            ObjectDone { path, .. } => Some(path),
+            Err { path, .. } => Some(path),
             _ => None,
         }
     }

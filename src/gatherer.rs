@@ -139,7 +139,6 @@ impl Gatherer {
 
     /// called when a watched ObjectPath's strong_count becomes dropped equal or below 2.
     pub(crate) fn notify_path_dropped(&self, path: ObjectPath) {
-        trace!("got notified: {:?}", path);
         (self.processor)(
             GathererHandle {
                 // infallible since caller checked already
@@ -413,6 +412,7 @@ impl GathererHandle<'_> {
         entry: &openat::Entry,
         parent_path: ObjectPath,
         parent_dir: Option<Arc<Dir>>,
+        watched: bool,
     ) {
         assert!(matches!(entry.simple_type(), Some(openat::SimpleType::Dir)));
         let subdir = ObjectPath::sub_object(
@@ -428,6 +428,7 @@ impl GathererHandle<'_> {
         // traversed depth first in inode increasing order.
         // PLANNED: When deeper than 64k consider it as loop? do a explicit loop check?
         let dir_prio = ((u16::MAX - subdir.depth()) as u64) << 48;
+        subdir.watch(watched);
         let message = DirectoryGatherMessage::new_dir(subdir);
 
         self.gatherer.send_dir(
@@ -440,12 +441,20 @@ impl GathererHandle<'_> {
     /// Sends openat::Entry components to the output channel. 'channel' can be any number as send wraps
     /// it by modulo the real number of channels. This allows to use any usize hash or
     /// otherwise large number.
-    pub fn output_entry(&self, channel: usize, entry: &openat::Entry, parent_path: ObjectPath) {
+    pub fn output_entry(
+        &self,
+        channel: usize,
+        entry: &openat::Entry,
+        parent_path: ObjectPath,
+        watched: bool,
+    ) {
         let path = ObjectPath::sub_object(
             &parent_path,
             self.gatherer.names.interning(entry.file_name()),
             Arc::downgrade(self.gatherer),
         );
+
+        path.watch(watched);
         self.gatherer
             .send_entry(channel, InventoryEntryMessage::Entry {
                 path,
@@ -455,7 +464,7 @@ impl GathererHandle<'_> {
     }
 
     /// Sends openat::Metadata to the output channel.  'channel' can be any number as send wraps
-    /// it by modulo the real number of channels. This allows to use any usize hash or
+    /// it by modulo the actual number of channels. This allows to use any usize hash or
     /// otherwise large number.
     pub fn output_metadata(
         &self,
@@ -463,17 +472,27 @@ impl GathererHandle<'_> {
         entry: &openat::Entry,
         parent_path: ObjectPath,
         metadata: openat::Metadata,
+        watched: bool,
     ) {
         let entryname = ObjectPath::sub_object(
             &parent_path,
             self.gatherer.names.interning(entry.file_name()),
             Arc::downgrade(self.gatherer),
         );
+        entryname.watch(watched);
         self.gatherer
             .send_entry(channel, InventoryEntryMessage::Metadata {
                 path: entryname,
                 metadata,
             });
+    }
+
+    /// Sends the ObjectDone notificaton to the output channel.  'channel' can be any number
+    /// as send wraps it by modulo the actual number of channels. This allows to use any usize
+    /// hash or otherwise large number.
+    pub fn output_object_done(&self, channel: usize, path: ObjectPath) {
+        self.gatherer
+            .send_entry(channel, InventoryEntryMessage::ObjectDone { path });
     }
 
     /// Sends an error to the output channel.  'channel' can be any number as send wraps
@@ -522,11 +541,12 @@ mod test {
                                     &entry,
                                     parent_path.clone(),
                                     parent_dir.clone(),
+                                    false,
                                 );
-                                gatherer.output_entry(0, &entry, parent_path.clone());
+                                gatherer.output_entry(0, &entry, parent_path.clone(), false);
                             }
                             _ => {
-                                gatherer.output_entry(0, &entry, parent_path);
+                                gatherer.output_entry(0, &entry, parent_path, false);
                             }
                         },
                         ProcessEntry::Result(Err(err), parent_path) => {
@@ -566,10 +586,10 @@ mod test {
                     match entry {
                         ProcessEntry::Result(Ok(entry), parent_path) => match entry.simple_type() {
                             Some(openat::SimpleType::Dir) => {
-                                gatherer.traverse_dir(&entry, parent_path, parent_dir);
+                                gatherer.traverse_dir(&entry, parent_path, parent_dir, false);
                             }
                             _ => {
-                                gatherer.output_entry(0, &entry, parent_path);
+                                gatherer.output_entry(0, &entry, parent_path, false);
                             }
                         },
                         ProcessEntry::Result(Err(err), parent_path) => {
@@ -607,11 +627,22 @@ mod test {
                     match entry {
                         ProcessEntry::Result(Ok(entry), parent_path) => match entry.simple_type() {
                             Some(openat::SimpleType::Dir) => {
-                                gatherer.traverse_dir(&entry, parent_path.clone(), parent_dir);
+                                gatherer.traverse_dir(
+                                    &entry,
+                                    parent_path.clone(),
+                                    parent_dir,
+                                    false,
+                                );
                             }
                             _ => match parent_dir.clone().unwrap().metadata(entry.file_name()) {
                                 Ok(metadata) => {
-                                    gatherer.output_metadata(0, &entry, parent_path, metadata);
+                                    gatherer.output_metadata(
+                                        0,
+                                        &entry,
+                                        parent_path,
+                                        metadata,
+                                        false,
+                                    );
                                 }
                                 Err(err) => {
                                     gatherer.output_error(0, Box::new(err), parent_path);
@@ -640,5 +671,42 @@ mod test {
                     let _ = stdout.write_all(b"\n");
                 }
             });
+    }
+
+    #[test]
+    #[ignore]
+    fn done_notifier() {
+        crate::test::init_env_logging();
+
+        let gatherer = Gatherer::build()
+            .start(Box::new(
+                |gatherer: GathererHandle, entry: ProcessEntry, parent_dir: Option<Arc<Dir>>| {
+                    match entry {
+                        ProcessEntry::Result(Ok(entry), parent_path) => match entry.simple_type() {
+                            Some(openat::SimpleType::Dir) => {
+                                gatherer.traverse_dir(&entry, parent_path, parent_dir, true);
+                            }
+                            _ => {
+                                gatherer.output_entry(0, &entry, parent_path, true);
+                            }
+                        },
+                        ProcessEntry::Result(Err(err), parent_path) => {
+                            gatherer.output_error(0, Box::new(err), parent_path);
+                        }
+                        ProcessEntry::ObjectDone(path) => {
+                            trace!("got notified: {:?}", path);
+                            gatherer.output_object_done(0, path);
+                        }
+                        _ => {}
+                    }
+                },
+            ))
+            .unwrap();
+
+        gatherer.load_dir_recursive(ObjectPath::new("src", Arc::downgrade(&gatherer)));
+
+        gatherer.channel(0).iter().for_each(|msg| {
+            trace!("output: {:?}", msg);
+        });
     }
 }

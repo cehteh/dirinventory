@@ -107,10 +107,16 @@ impl ObjectPath {
         Arc::strong_count(&self.0)
     }
 
-    /// Enables watching on this ObjectPath, whenever all processing handles get dropped a
-    /// notification is issued.
-    pub fn watch(&self) {
-        self.0.watched.store(true, atomic::Ordering::Relaxed);
+    /// Sets the notification state on this ObjectPath. When true and all processing handles get
+    /// dropped a notification is issued.
+    pub fn watch(&self, watch: bool) {
+        self.0.watched.store(watch, atomic::Ordering::Relaxed);
+    }
+
+    /// Queries the notification state on this ObjectPath. When true and all processing handles get
+    /// dropped a notification is issued.
+    pub fn is_watched(&self) -> bool {
+        self.0.watched.load(atomic::Ordering::Relaxed)
     }
 
     /// Returns am Arc handle to the Gatherer if available
