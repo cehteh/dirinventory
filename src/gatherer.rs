@@ -1,9 +1,10 @@
 //! The Gatherer manages threads which walking directories. For each element found a custom processor function is called which may
 //! add directories back to the list of directories to process and found entries to an output queue.
 use std::io;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::thread;
 use std::ops::DerefMut;
+use std::path::Path;
 
 use mpmcpq::*;
 use crossbeam_channel::{bounded, Receiver, Sender};
@@ -14,57 +15,29 @@ use parking_lot::Mutex;
 use crate::*;
 
 /// The type of the user supplied closure/function to process entries.  Takes a GathererHandle
-/// which defines the API for pushing things back on the Gatherers queues, the raw
-/// openat::Entry to be processed, an object to the path of the parent directory and the Dir
-/// handle of the parent dir.
-pub type ProcessFn = dyn Fn(GathererHandle, ProcessEntry, Option<Arc<Dir>>) + Send + Sync;
+/// which defines the API for pushing things back on the Gatherers queues and a ProcessMessage
+/// which wraps the things to be handled.
+// PLANNED: Dir will become part of ObjectPath
+pub type ProcessFn = dyn Fn(GathererHandle, ProcessMessage, Option<Arc<Dir>>) + Send + Sync;
 
-/// The ProcessFn is called with this as parameter. It shall match on this and implement the
-/// desired actions.
-pub enum ProcessEntry {
-    /// Either an entry in the filesystem or an error.
+/// The input to the ProcessFn which dispatches actions on the queues via the GathererHandle.
+pub enum ProcessMessage {
+    /// Either an openat::Entry for iterated directory entries or an error.
     Result(io::Result<openat::Entry>, ObjectPath),
-    /// Got a notification that a ObjectPath processing finished.
+    /// A notification that a ObjectPath processing is finished.
     ObjectDone(ObjectPath),
     /// The ProcessFn is called with this after all entries of an directory are processed (but
     /// not its subdirectories). This is used to notify that no more entries of the saied
-    /// directory are to be expected.
+    /// directory are to be expected. Note that ObjectDone messages may still appear.
     EndOfDirectory(ObjectPath),
 }
 
 type GathererStash<'a> = Stash<'a, DirectoryGatherMessage, u64>;
 
-/// Create a space efficient store for file metadata of files larger than a certain
-/// min_blocksize.  This is used to find whcih files to delete first for most space efficient
-/// deletion.  There should be only one 'Gatherer' around as it is used to merge hardlinks
+/// The Gatherer manages the queues and threads traversing directories.
+/// There should be only one 'Gatherer' around as it is used to merge hardlinks
 /// and needs to have a global picture of all indexed files.
-pub struct Gatherer {
-    /// All file/dir names are interned here
-    names: InternedNames<32>,
-
-    /// The processing function
-    processor: Box<ProcessFn>,
-
-    // message queues
-    /// The input PriorityQueue fed with directories to be processed
-    dirs_queue:      PriorityQueue<DirectoryGatherMessage, u64>,
-    /// The output channels where the results are send to.
-    #[allow(clippy::type_complexity)]
-    output_channels: Vec<(
-        Sender<InventoryEntryMessage>,
-        Arc<Receiver<InventoryEntryMessage>>,
-    )>,
-
-    /// Sending an initial directory requires an stash.
-    // PLANNED: Also used when one wants to push multiple directories.
-    kickoff_stash: Mutex<GathererStash<'static>>,
-
-    /// The maximum number of file descriptors this Gatherer may use.
-    fd_limit: usize,
-
-    /// Number of DirectoryGathermessages batched together
-    message_batch: usize,
-}
+pub struct Gatherer(Arc<GathererInner>);
 
 impl Gatherer {
     /// Creates a gatherer builder used to configure the gatherer. Uses conservative defaults,
@@ -74,19 +47,30 @@ impl Gatherer {
         GathererBuilder::new()
     }
 
+    /// Try to upgrade a Weak reference into a Gatherer.
+    pub(crate) fn upgrade(weak: &Weak<GathererInner>) -> Option<Gatherer> {
+        weak.upgrade().map(Gatherer)
+    }
+
+    /// Get a Weak reference from a Gatherer.
+    pub(crate) fn downgrade(&self) -> Weak<GathererInner> {
+        Arc::downgrade(&self.0)
+    }
+
     /// Returns the an Arc of the receiver side of output channel 'n'.
     pub fn channel(&self, n: usize) -> Arc<Receiver<InventoryEntryMessage>> {
-        self.output_channels[n].1.clone()
+        self.0.output_channels[n].1.clone()
     }
 
     /// Returns the number of output channels.
     pub fn num_channels(&self) -> usize {
-        self.output_channels.len() as usize
+        self.0.output_channels.len() as usize
     }
 
     /// Returns a Vec with all receiving sides of the output channels.
     pub fn channels_as_vec(&self) -> Vec<Arc<Receiver<InventoryEntryMessage>>> {
-        self.output_channels
+        self.0
+            .output_channels
             .iter()
             .map(|(_, r)| r.clone())
             .collect()
@@ -94,15 +78,18 @@ impl Gatherer {
 
     /// Adds a directory to the processing queue of the inventory. This is the main function
     /// to initiate a directory traversal.
-    pub fn load_dir_recursive(&self, path: ObjectPath) {
-        let mut stash = self.kickoff_stash.lock();
+    // pub fn load_dir_recursive(&self, path: ObjectPath) {
+    pub fn load_dir_recursive<P: AsRef<Path>>(&self, path: P, watch: bool) {
+        let path = ObjectPath::new(path, self);
+        path.watch(watch);
+        let mut stash = self.0.kickoff_stash.lock();
         self.send_dir(
             DirectoryGatherMessage::new_dir(path),
             u64::MAX, /* initial message priority instead depth/inode calculation, added
                        * directories are processed at the lowest priority */
             Some(stash.deref_mut()),
         );
-        self.dirs_queue.sync(stash.deref_mut());
+        self.0.dirs_queue.sync(stash.deref_mut());
     }
 
     // TODO: fn shutdown, there is currently no way to free a Gatherer as the threads keep it alive
@@ -110,10 +97,11 @@ impl Gatherer {
     /// put a DirectoryGatherMessage on the input queue (traverse sub directories).
     fn send_dir(&self, message: DirectoryGatherMessage, prio: u64, stash: Option<&GathererStash>) {
         if let Some(stash) = stash {
-            self.dirs_queue
-                .send_batched(message, prio, self.message_batch, stash);
+            self.0
+                .dirs_queue
+                .send_batched(message, prio, self.0.message_batch, stash);
         } else {
-            self.dirs_queue.send_nostash(message, prio);
+            self.0.dirs_queue.send_nostash(message, prio);
         }
     }
 
@@ -130,8 +118,9 @@ impl Gatherer {
         // Ignore result, the user may have dropped the receiver, but there is nothing we
         // should do about it.
         let _ = unsafe {
-            self.output_channels
-                .get_unchecked(channel % self.output_channels.len())
+            self.0
+                .output_channels
+                .get_unchecked(channel % self.0.output_channels.len())
                 .0
                 .send(message)
         };
@@ -139,33 +128,34 @@ impl Gatherer {
 
     /// called when a watched ObjectPath's strong_count becomes dropped equal or below 2.
     pub(crate) fn notify_path_dropped(&self, path: ObjectPath) {
-        (self.processor)(
+        (self.0.processor)(
             GathererHandle {
                 // infallible since caller checked already
                 gatherer: &path.gatherer().unwrap(),
                 stash:    None,
             },
-            ProcessEntry::ObjectDone(path),
+            ProcessMessage::ObjectDone(path),
             None,
         );
     }
 
     /// Spawns a single gatherer thread
-    fn spawn_gather_thread(self: Arc<Self>, n: usize) -> io::Result<thread::JoinHandle<()>> {
+    fn spawn_gather_thread(&self, n: usize) -> io::Result<thread::JoinHandle<()>> {
+        let gatherer = Gatherer(self.0.clone());
         thread::Builder::new()
             .name(format!("gather/{}", n))
             .spawn(move || {
                 debug!("thread started: {}", thread::current().name().unwrap());
-                let stash: GathererStash = Stash::new(&self.dirs_queue);
+                let stash: GathererStash = Stash::new(&gatherer.0.dirs_queue);
                 loop {
                     use DirectoryGatherMessage::*;
 
                     // TODO: messages for dir enter/leave on the ouput queue
-                    match self.dirs_queue.recv_guard().message() {
+                    match gatherer.0.dirs_queue.recv_guard().message() {
                         mpmcpq::Message::Msg(TraverseDirectory { path, parent_dir }, prio) => {
-                            if used_handles() >= self.fd_limit {
+                            if used_handles() >= gatherer.0.fd_limit {
                                 warn!("filehandle limit reached");
-                                self.resend_dir(
+                                gatherer.resend_dir(
                                     TraverseDirectory {
                                         path:       path.clone(),
                                         parent_dir: parent_dir.clone(),
@@ -192,31 +182,31 @@ impl Gatherer {
                                     dir.list_self()
                                         .map(|dir_iter| {
                                             dir_iter.for_each(|entry| {
-                                                (self.processor)(
+                                                (gatherer.0.processor)(
                                                     GathererHandle {
-                                                        gatherer: &self,
+                                                        gatherer: &gatherer,
                                                         stash:    Some(&stash),
                                                     },
-                                                    ProcessEntry::Result(entry, path.clone()),
+                                                    ProcessMessage::Result(entry, path.clone()),
                                                     Some(dir.clone()),
                                                 );
                                             });
 
-                                            (self.processor)(
+                                            (gatherer.0.processor)(
                                                 GathererHandle {
-                                                    gatherer: &self,
+                                                    gatherer: &gatherer,
                                                     stash:    Some(&stash),
                                                 },
-                                                ProcessEntry::EndOfDirectory(path.clone()),
+                                                ProcessMessage::EndOfDirectory(path.clone()),
                                                 Some(dir.clone()),
                                             );
 
-                                            self.dirs_queue.sync(&stash);
+                                            gatherer.0.dirs_queue.sync(&stash);
                                             crate::dirhandle::dec_handles();
                                         })
                                         .map_err(|err| {
                                             if err.raw_os_error() == Some(libc::EMFILE) {
-                                                self.resend_dir(
+                                                gatherer.resend_dir(
                                                     TraverseDirectory {
                                                         path:       path.clone(),
                                                         parent_dir: parent_dir.clone(),
@@ -225,12 +215,12 @@ impl Gatherer {
                                                     &stash,
                                                 );
                                             } else {
-                                                (self.processor)(
+                                                (gatherer.0.processor)(
                                                     GathererHandle {
-                                                        gatherer: &self,
+                                                        gatherer: &gatherer,
                                                         stash:    Some(&stash),
                                                     },
-                                                    ProcessEntry::Result(Err(err), path.clone()),
+                                                    ProcessMessage::Result(Err(err), path.clone()),
                                                     Some(dir),
                                                 );
                                             }
@@ -239,7 +229,7 @@ impl Gatherer {
                                 .map_err(|err| {
                                     if err.raw_os_error() == Some(libc::EMFILE) {
                                         warn!("filehandles exhausted");
-                                        self.resend_dir(
+                                        gatherer.resend_dir(
                                             TraverseDirectory {
                                                 path:       path.clone(),
                                                 parent_dir: parent_dir.clone(),
@@ -248,12 +238,12 @@ impl Gatherer {
                                             &stash,
                                         );
                                     } else {
-                                        (self.processor)(
+                                        (gatherer.0.processor)(
                                             GathererHandle {
-                                                gatherer: &self,
+                                                gatherer: &gatherer,
                                                 stash:    Some(&stash),
                                             },
-                                            ProcessEntry::Result(Err(err), path.clone()),
+                                            ProcessMessage::Result(Err(err), path.clone()),
                                             parent_dir.clone(),
                                         );
                                     }
@@ -263,14 +253,42 @@ impl Gatherer {
                         }
                         mpmcpq::Message::Drained => {
                             trace!("drained!!!");
-                            (0..self.output_channels.len())
-                                .for_each(|n| self.send_entry(n, InventoryEntryMessage::Done));
+                            (0..gatherer.0.output_channels.len())
+                                .for_each(|n| gatherer.send_entry(n, InventoryEntryMessage::Done));
                         }
                         _ => unimplemented!(),
                     }
                 }
             })
     }
+}
+
+pub(crate) struct GathererInner {
+    /// All file/dir names are interned here
+    names: InternedNames<32>,
+
+    /// The processing function
+    processor: Box<ProcessFn>,
+
+    // message queues
+    /// The input PriorityQueue fed with directories to be processed
+    dirs_queue:      PriorityQueue<DirectoryGatherMessage, u64>,
+    /// The output channels where the results are send to.
+    #[allow(clippy::type_complexity)]
+    output_channels: Vec<(
+        Sender<InventoryEntryMessage>,
+        Arc<Receiver<InventoryEntryMessage>>,
+    )>,
+
+    /// Sending an initial directory requires an stash.
+    // PLANNED: Also used when one wants to push multiple directories.
+    kickoff_stash: Mutex<GathererStash<'static>>,
+
+    /// The maximum number of file descriptors this Gatherer may use.
+    fd_limit: usize,
+
+    /// Number of DirectoryGathermessages batched together
+    message_batch: usize,
 }
 
 /// Configures a Gatherer
@@ -303,7 +321,7 @@ impl GathererBuilder {
     /// function is used to process every directory entry seen. It should be small and fast
     /// selecting which sub directories to be traversed and which entries to pass to the
     /// output channels. Any more work should be done on the output then.
-    pub fn start(&self, processor: Box<ProcessFn>) -> io::Result<Arc<Gatherer>> {
+    pub fn start(&self, processor: Box<ProcessFn>) -> io::Result<Gatherer> {
         let output_channels = (0..self.num_output_channels)
             .map(|_| {
                 let (sender, receiver) = bounded(
@@ -318,7 +336,7 @@ impl GathererBuilder {
             })
             .collect();
 
-        let gatherer = Arc::new(Gatherer {
+        let gatherer = Gatherer(Arc::new(GathererInner {
             names: InternedNames::new(),
             dirs_queue: PriorityQueue::new(),
             output_channels,
@@ -326,10 +344,10 @@ impl GathererBuilder {
             kickoff_stash: Mutex::new(GathererStash::new_without_priority_queue()),
             fd_limit: self.fd_limit,
             message_batch: self.message_batch,
-        });
+        }));
 
         (0..self.num_gather_threads).try_for_each(|n| -> io::Result<()> {
-            gatherer.clone().spawn_gather_thread(n)?;
+            gatherer.spawn_gather_thread(n)?;
             Ok(())
         })?;
 
@@ -400,7 +418,7 @@ impl GathererBuilder {
 /// Defines the API the user defined ProcessFn may use to send data back on the
 /// input queue and output channels.
 pub struct GathererHandle<'a> {
-    gatherer: &'a Arc<Gatherer>,
+    gatherer: &'a Gatherer,
     stash:    Option<&'a GathererStash<'a>>,
 }
 
@@ -417,8 +435,8 @@ impl GathererHandle<'_> {
         assert!(matches!(entry.simple_type(), Some(openat::SimpleType::Dir)));
         let subdir = ObjectPath::sub_object(
             &parent_path,
-            self.gatherer.names.interning(entry.file_name()),
-            Arc::downgrade(self.gatherer),
+            self.gatherer.0.names.interning(entry.file_name()),
+            self.gatherer,
         );
 
         // The Order of directory traversal is defined by the 64bit priority in the
@@ -450,8 +468,8 @@ impl GathererHandle<'_> {
     ) {
         let path = ObjectPath::sub_object(
             &parent_path,
-            self.gatherer.names.interning(entry.file_name()),
-            Arc::downgrade(self.gatherer),
+            self.gatherer.0.names.interning(entry.file_name()),
+            self.gatherer,
         );
 
         path.watch(watched);
@@ -476,8 +494,8 @@ impl GathererHandle<'_> {
     ) {
         let entryname = ObjectPath::sub_object(
             &parent_path,
-            self.gatherer.names.interning(entry.file_name()),
-            Arc::downgrade(self.gatherer),
+            self.gatherer.0.names.interning(entry.file_name()),
+            self.gatherer,
         );
         entryname.watch(watched);
         self.gatherer
@@ -520,7 +538,7 @@ mod test {
     fn smoke() {
         crate::test::init_env_logging();
         let _ = Gatherer::build().with_gather_threads(1).start(Box::new(
-            |_gatherer: GathererHandle, _entry: ProcessEntry, _parent_dir: Option<Arc<Dir>>| {},
+            |_gatherer: GathererHandle, _entry: ProcessMessage, _parent_dir: Option<Arc<Dir>>| {},
         ));
     }
 
@@ -533,9 +551,10 @@ mod test {
             .with_gather_threads(64)
             .with_fd_limit(768)
             .start(Box::new(
-                |gatherer: GathererHandle, entry: ProcessEntry, parent_dir: Option<Arc<Dir>>| {
+                |gatherer: GathererHandle, entry: ProcessMessage, parent_dir: Option<Arc<Dir>>| {
                     match entry {
-                        ProcessEntry::Result(Ok(entry), parent_path) => match entry.simple_type() {
+                        ProcessMessage::Result(Ok(entry), parent_path) => match entry.simple_type()
+                        {
                             Some(openat::SimpleType::Dir) => {
                                 gatherer.traverse_dir(
                                     &entry,
@@ -549,7 +568,7 @@ mod test {
                                 gatherer.output_entry(0, &entry, parent_path, false);
                             }
                         },
-                        ProcessEntry::Result(Err(err), parent_path) => {
+                        ProcessMessage::Result(Err(err), parent_path) => {
                             gatherer.output_error(0, Box::new(err), parent_path);
                         }
                         _ => {}
@@ -558,7 +577,7 @@ mod test {
             ))
             .unwrap();
 
-        gatherer.load_dir_recursive(ObjectPath::new(".", Arc::downgrade(&gatherer))); //TODO: pass only &str
+        gatherer.load_dir_recursive(".", false);
 
         let mut stdout = std::io::stdout();
 
@@ -582,9 +601,10 @@ mod test {
 
         let gatherer = Gatherer::build()
             .start(Box::new(
-                |gatherer: GathererHandle, entry: ProcessEntry, parent_dir: Option<Arc<Dir>>| {
+                |gatherer: GathererHandle, entry: ProcessMessage, parent_dir: Option<Arc<Dir>>| {
                     match entry {
-                        ProcessEntry::Result(Ok(entry), parent_path) => match entry.simple_type() {
+                        ProcessMessage::Result(Ok(entry), parent_path) => match entry.simple_type()
+                        {
                             Some(openat::SimpleType::Dir) => {
                                 gatherer.traverse_dir(&entry, parent_path, parent_dir, false);
                             }
@@ -592,7 +612,7 @@ mod test {
                                 gatherer.output_entry(0, &entry, parent_path, false);
                             }
                         },
-                        ProcessEntry::Result(Err(err), parent_path) => {
+                        ProcessMessage::Result(Err(err), parent_path) => {
                             gatherer.output_error(0, Box::new(err), parent_path);
                         }
                         _ => {}
@@ -601,7 +621,7 @@ mod test {
             ))
             .unwrap();
 
-        gatherer.load_dir_recursive(ObjectPath::new("src", Arc::downgrade(&gatherer)));
+        gatherer.load_dir_recursive("src", false);
 
         let mut stdout = std::io::stdout();
 
@@ -623,9 +643,10 @@ mod test {
 
         let gatherer = Gatherer::build()
             .start(Box::new(
-                |gatherer: GathererHandle, entry: ProcessEntry, parent_dir: Option<Arc<Dir>>| {
+                |gatherer: GathererHandle, entry: ProcessMessage, parent_dir: Option<Arc<Dir>>| {
                     match entry {
-                        ProcessEntry::Result(Ok(entry), parent_path) => match entry.simple_type() {
+                        ProcessMessage::Result(Ok(entry), parent_path) => match entry.simple_type()
+                        {
                             Some(openat::SimpleType::Dir) => {
                                 gatherer.traverse_dir(
                                     &entry,
@@ -649,7 +670,7 @@ mod test {
                                 }
                             },
                         },
-                        ProcessEntry::Result(Err(err), parent_path) => {
+                        ProcessMessage::Result(Err(err), parent_path) => {
                             gatherer.output_error(0, Box::new(err), parent_path);
                         }
                         _ => {}
@@ -657,7 +678,7 @@ mod test {
                 },
             ))
             .unwrap();
-        gatherer.load_dir_recursive(ObjectPath::new("src", Arc::downgrade(&gatherer)));
+        gatherer.load_dir_recursive("src", false);
 
         let mut stdout = std::io::stdout();
 
@@ -680,9 +701,10 @@ mod test {
 
         let gatherer = Gatherer::build()
             .start(Box::new(
-                |gatherer: GathererHandle, entry: ProcessEntry, parent_dir: Option<Arc<Dir>>| {
+                |gatherer: GathererHandle, entry: ProcessMessage, parent_dir: Option<Arc<Dir>>| {
                     match entry {
-                        ProcessEntry::Result(Ok(entry), parent_path) => match entry.simple_type() {
+                        ProcessMessage::Result(Ok(entry), parent_path) => match entry.simple_type()
+                        {
                             Some(openat::SimpleType::Dir) => {
                                 gatherer.traverse_dir(&entry, parent_path, parent_dir, true);
                             }
@@ -690,10 +712,10 @@ mod test {
                                 gatherer.output_entry(0, &entry, parent_path, true);
                             }
                         },
-                        ProcessEntry::Result(Err(err), parent_path) => {
+                        ProcessMessage::Result(Err(err), parent_path) => {
                             gatherer.output_error(0, Box::new(err), parent_path);
                         }
-                        ProcessEntry::ObjectDone(path) => {
+                        ProcessMessage::ObjectDone(path) => {
                             trace!("got notified: {:?}", path);
                             gatherer.output_object_done(0, path);
                         }
@@ -703,7 +725,7 @@ mod test {
             ))
             .unwrap();
 
-        gatherer.load_dir_recursive(ObjectPath::new("src", Arc::downgrade(&gatherer)));
+        gatherer.load_dir_recursive("src", true);
 
         gatherer.channel(0).iter().for_each(|msg| {
             trace!("output: {:?}", msg);

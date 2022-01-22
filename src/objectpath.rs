@@ -7,7 +7,7 @@ use std::sync::atomic::{self, AtomicBool};
 pub use log::{debug, error, info, trace, warn};
 use derivative::Derivative;
 
-use crate::{Gatherer, InternedName};
+use crate::{Gatherer, GathererInner, InternedName};
 
 /// Space efficient storage of paths. Instead storing full path-names it stores only interned
 /// strings of the actual object names and a reference to its parent. ObjectPaths are reference counted.
@@ -17,24 +17,44 @@ pub struct ObjectPath(Arc<ObjectPathInner>);
 
 impl ObjectPath {
     /// Creates a new ObjectPath without a parent.
-    pub fn new<P: AsRef<Path>>(path: P, gatherer: Weak<Gatherer>) -> ObjectPath {
+    pub fn new<P: AsRef<Path>>(path: P, gatherer: &Gatherer) -> ObjectPath {
         ObjectPath(Arc::new(ObjectPathInner {
-            parent: None,
-            name: InternedName::new(path.as_ref().as_os_str()),
-            gatherer,
+            parent:   None,
+            name:     InternedName::new(path.as_ref().as_os_str()),
+            gatherer: gatherer.downgrade(),
+            watched:  AtomicBool::new(false),
+        }))
+    }
+
+    /// Creates a new ObjectPath without a parent and associated gatherer.
+    pub fn without_gatherer<P: AsRef<Path>>(path: P) -> ObjectPath {
+        ObjectPath(Arc::new(ObjectPathInner {
+            parent:   None,
+            name:     InternedName::new(path.as_ref().as_os_str()),
+            gatherer: Weak::new(),
+            watched:  AtomicBool::new(false),
+        }))
+    }
+
+    /// Creates a new ObjectPath as sub-object to some existing ObjectPath object.
+    #[must_use]
+    pub fn sub_object(&self, name: InternedName, gatherer: &Gatherer) -> ObjectPath {
+        ObjectPath(Arc::new(ObjectPathInner {
+            parent: Some(self.clone()),
+            name,
+            gatherer: gatherer.downgrade(),
             watched: AtomicBool::new(false),
         }))
     }
 
-    /// Creates a new ObjectPath as sub-object to some existing ObjectPath object.  The user
-    /// must supply 'watched = true' when this object shall generate a notification when it
-    /// becomes dropped.
+    /// Creates a new ObjectPath as sub-object to some existing ObjectPath object without
+    /// associated gatherer.
     #[must_use]
-    pub fn sub_object(&self, name: InternedName, gatherer: Weak<Gatherer>) -> ObjectPath {
+    pub fn sub_object_without_gatherer(&self, name: InternedName) -> ObjectPath {
         ObjectPath(Arc::new(ObjectPathInner {
             parent: Some(self.clone()),
             name,
-            gatherer,
+            gatherer: Weak::new(),
             watched: AtomicBool::new(false),
         }))
     }
@@ -120,8 +140,8 @@ impl ObjectPath {
     }
 
     /// Returns am Arc handle to the Gatherer if available
-    pub fn gatherer(&self) -> Option<Arc<Gatherer>> {
-        self.0.gatherer.upgrade()
+    pub fn gatherer(&self) -> Option<Gatherer> {
+        Gatherer::upgrade(&self.0.gatherer)
     }
 }
 
@@ -159,7 +179,7 @@ pub struct ObjectPathInner {
         PartialOrd = "ignore",
         Ord = "ignore"
     )]
-    gatherer: Weak<Gatherer>,
+    gatherer: Weak<GathererInner>,
     #[derivative(
         Hash = "ignore",
         PartialEq = "ignore",
@@ -180,7 +200,6 @@ impl fmt::Debug for ObjectPath {
 mod test {
     use std::path::PathBuf;
     use std::ffi::OsStr;
-    use std::sync::Weak;
 
     #[allow(unused_imports)]
     pub use log::{debug, error, info, trace, warn};
@@ -192,7 +211,7 @@ mod test {
     fn smoke() {
         crate::test::init_env_logging();
         assert_eq!(
-            ObjectPath::new(".", Weak::new()).to_pathbuf(),
+            ObjectPath::without_gatherer(".").to_pathbuf(),
             PathBuf::from(".")
         );
     }
@@ -201,10 +220,10 @@ mod test {
     fn path_subobject() {
         crate::test::init_env_logging();
         use std::ffi::OsStr;
-        let p = ObjectPath::new(".", Weak::new());
+        let p = ObjectPath::without_gatherer(".");
         let mut pathbuf = PathBuf::new();
         assert_eq!(
-            p.sub_object(InternedName::new(OsStr::new("foo")), Weak::new())
+            p.sub_object_without_gatherer(InternedName::new(OsStr::new("foo")))
                 .write_pathbuf(&mut pathbuf),
             &PathBuf::from("./foo")
         );
@@ -213,22 +232,22 @@ mod test {
     #[test]
     fn path_ordering() {
         crate::test::init_env_logging();
-        let foo = ObjectPath::new("foo", Weak::new());
-        let bar = ObjectPath::new("bar", Weak::new());
+        let foo = ObjectPath::without_gatherer("foo");
+        let bar = ObjectPath::without_gatherer("bar");
         assert!(bar < foo);
 
-        let bar2 = ObjectPath::new("bar", Weak::new());
+        let bar2 = ObjectPath::without_gatherer("bar");
         assert!(bar == bar2);
 
-        let foobar = foo.sub_object(InternedName::new(OsStr::new("bar")), Weak::new());
-        let barfoo = bar.sub_object(InternedName::new(OsStr::new("foo")), Weak::new());
+        let foobar = foo.sub_object_without_gatherer(InternedName::new(OsStr::new("bar")));
+        let barfoo = bar.sub_object_without_gatherer(InternedName::new(OsStr::new("foo")));
         assert!(barfoo < foobar);
     }
 
     #[test]
     fn metadata() {
         crate::test::init_env_logging();
-        let cargo = ObjectPath::new("Cargo.toml", Weak::new());
+        let cargo = ObjectPath::without_gatherer("Cargo.toml");
         assert!(cargo.metadata().is_ok());
     }
 }

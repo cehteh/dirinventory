@@ -5,7 +5,8 @@
 #![feature(once_cell)]
 
 mod gatherer;
-pub use gatherer::{Gatherer, GathererBuilder, GathererHandle, ProcessEntry, ProcessFn};
+pub use gatherer::{Gatherer, GathererBuilder, GathererHandle, ProcessFn, ProcessMessage};
+pub(crate) use gatherer::GathererInner;
 
 mod messages;
 pub use messages::{DirectoryGatherMessage, InventoryEntryMessage};
