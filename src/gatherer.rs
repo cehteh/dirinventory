@@ -83,7 +83,7 @@ impl Gatherer {
         let path = ObjectPath::new(path, self);
         path.watch(watch);
         let mut stash = self.0.kickoff_stash.lock();
-        self.send_dir(
+        self.0.send_dir(
             DirectoryGatherMessage::new_dir(path),
             u64::MAX, /* initial message priority instead depth/inode calculation, added
                        * directories are processed at the lowest priority */
@@ -93,38 +93,6 @@ impl Gatherer {
     }
 
     // TODO: fn shutdown, there is currently no way to free a Gatherer as the threads keep it alive
-
-    /// put a DirectoryGatherMessage on the input queue (traverse sub directories).
-    fn send_dir(&self, message: DirectoryGatherMessage, prio: u64, stash: Option<&GathererStash>) {
-        if let Some(stash) = stash {
-            self.0
-                .dirs_queue
-                .send_batched(message, prio, self.0.message_batch, stash);
-        } else {
-            self.0.dirs_queue.send_nostash(message, prio);
-        }
-    }
-
-    // resend a dir after 5ms pause to recover from filehandle depletion
-    fn resend_dir(&self, message: DirectoryGatherMessage, prio: u64, stash: &GathererStash) {
-        self.send_dir(message, prio, Some(stash));
-        thread::sleep(std::time::Duration::from_millis(5));
-    }
-
-    /// Put a message on an output channel. The channels are used modulo the
-    /// output_channels.len(), thus can never overflow and a user may use a hash/larger number
-    /// than available.
-    fn send_entry(&self, channel: usize, message: InventoryEntryMessage) {
-        // Ignore result, the user may have dropped the receiver, but there is nothing we
-        // should do about it.
-        let _ = unsafe {
-            self.0
-                .output_channels
-                .get_unchecked(channel % self.0.output_channels.len())
-                .0
-                .send(message)
-        };
-    }
 
     /// called when a watched ObjectPath's strong_count becomes dropped equal or below 2.
     pub(crate) fn notify_path_dropped(&self, path: ObjectPath) {
@@ -155,7 +123,7 @@ impl Gatherer {
                         mpmcpq::Message::Msg(TraverseDirectory { path, parent_dir }, prio) => {
                             if used_handles() >= gatherer.0.fd_limit {
                                 warn!("filehandle limit reached");
-                                gatherer.resend_dir(
+                                gatherer.0.resend_dir(
                                     TraverseDirectory {
                                         path:       path.clone(),
                                         parent_dir: parent_dir.clone(),
@@ -206,7 +174,7 @@ impl Gatherer {
                                         })
                                         .map_err(|err| {
                                             if err.raw_os_error() == Some(libc::EMFILE) {
-                                                gatherer.resend_dir(
+                                                gatherer.0.resend_dir(
                                                     TraverseDirectory {
                                                         path:       path.clone(),
                                                         parent_dir: parent_dir.clone(),
@@ -229,7 +197,7 @@ impl Gatherer {
                                 .map_err(|err| {
                                     if err.raw_os_error() == Some(libc::EMFILE) {
                                         warn!("filehandles exhausted");
-                                        gatherer.resend_dir(
+                                        gatherer.0.resend_dir(
                                             TraverseDirectory {
                                                 path:       path.clone(),
                                                 parent_dir: parent_dir.clone(),
@@ -253,8 +221,9 @@ impl Gatherer {
                         }
                         mpmcpq::Message::Drained => {
                             trace!("drained!!!");
-                            (0..gatherer.0.output_channels.len())
-                                .for_each(|n| gatherer.send_entry(n, InventoryEntryMessage::Done));
+                            (0..gatherer.0.output_channels.len()).for_each(|n| {
+                                gatherer.0.send_entry(n, InventoryEntryMessage::Done)
+                            });
                         }
                         _ => unimplemented!(),
                     }
@@ -289,6 +258,46 @@ pub(crate) struct GathererInner {
 
     /// Number of DirectoryGathermessages batched together
     message_batch: usize,
+}
+
+impl GathererInner {
+    /// put a DirectoryGatherMessage on the input queue (traverse sub directories).
+    fn send_dir(&self, message: DirectoryGatherMessage, prio: u64, stash: Option<&GathererStash>) {
+        let DirectoryGatherMessage::TraverseDirectory { path, .. } = &message;
+        trace!(
+            "COUNT: {:?} = {} {}",
+            path,
+            path.strong_count(),
+            path.is_watched()
+        );
+
+        if let Some(stash) = stash {
+            self.dirs_queue
+                .send_batched(message, prio, self.message_batch, stash);
+        } else {
+            self.dirs_queue.send_nostash(message, prio);
+        }
+    }
+
+    // resend a dir after 5ms pause to recover from filehandle depletion
+    fn resend_dir(&self, message: DirectoryGatherMessage, prio: u64, stash: &GathererStash) {
+        self.send_dir(message, prio, Some(stash));
+        thread::sleep(std::time::Duration::from_millis(5));
+    }
+
+    /// Put a message on an output channel. The channels are used modulo the
+    /// output_channels.len(), thus can never overflow and a user may use a hash/larger number
+    /// than available.
+    fn send_entry(&self, channel: usize, message: InventoryEntryMessage) {
+        // Ignore result, the user may have dropped the receiver, but there is nothing we
+        // should do about it.
+        let _ = unsafe {
+            self.output_channels
+                .get_unchecked(channel % self.output_channels.len())
+                .0
+                .send(message)
+        };
+    }
 }
 
 /// Configures a Gatherer
@@ -449,7 +458,7 @@ impl GathererHandle<'_> {
         subdir.watch(watched);
         let message = DirectoryGatherMessage::new_dir(subdir);
 
-        self.gatherer.send_dir(
+        self.gatherer.0.send_dir(
             message.with_parent_dir(parent_dir),
             dir_prio + entry.inode(),
             self.stash,
@@ -474,6 +483,7 @@ impl GathererHandle<'_> {
 
         path.watch(watched);
         self.gatherer
+            .0
             .send_entry(channel, InventoryEntryMessage::Entry {
                 path,
                 file_type: entry.simple_type(),
@@ -499,6 +509,7 @@ impl GathererHandle<'_> {
         );
         entryname.watch(watched);
         self.gatherer
+            .0
             .send_entry(channel, InventoryEntryMessage::Metadata {
                 path: entryname,
                 metadata,
@@ -510,6 +521,7 @@ impl GathererHandle<'_> {
     /// hash or otherwise large number.
     pub fn output_object_done(&self, channel: usize, path: ObjectPath) {
         self.gatherer
+            .0
             .send_entry(channel, InventoryEntryMessage::ObjectDone { path });
     }
 
@@ -519,6 +531,7 @@ impl GathererHandle<'_> {
     pub fn output_error(&self, channel: usize, error: DynError, path: ObjectPath) {
         warn!("{:?} at {:?}", error, path);
         self.gatherer
+            .0
             .send_entry(channel, InventoryEntryMessage::Err { path, error });
     }
 }
