@@ -448,6 +448,9 @@ impl GathererHandle<'_> {
             self.gatherer,
         );
 
+        subdir.watch(watched);
+        parent_dir.as_ref().map(|dir| subdir.set_dir(dir));
+
         // The Order of directory traversal is defined by the 64bit priority in the
         // PriorityQueue. This 64bit are composed of the inode number added directory
         // depth inversed from u64::MAX down shifted by 48 bits (resulting in the
@@ -455,7 +458,6 @@ impl GathererHandle<'_> {
         // traversed depth first in inode increasing order.
         // PLANNED: When deeper than 64k consider it as loop? do a explicit loop check?
         let dir_prio = ((u16::MAX - subdir.depth()) as u64) << 48;
-        subdir.watch(watched);
         let message = DirectoryGatherMessage::new_dir(subdir);
 
         self.gatherer.0.send_dir(
@@ -482,6 +484,7 @@ impl GathererHandle<'_> {
         );
 
         path.watch(watched);
+
         self.gatherer
             .0
             .send_entry(channel, InventoryEntryMessage::Entry {
@@ -507,7 +510,9 @@ impl GathererHandle<'_> {
             self.gatherer.0.names.interning(entry.file_name()),
             self.gatherer,
         );
+
         entryname.watch(watched);
+
         self.gatherer
             .0
             .send_entry(channel, InventoryEntryMessage::Metadata {

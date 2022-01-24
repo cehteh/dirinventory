@@ -6,8 +6,9 @@ use std::sync::atomic::{self, AtomicBool};
 #[allow(unused_imports)]
 pub use log::{debug, error, info, trace, warn};
 use derivative::Derivative;
+use rcell::{RCell, Replace};
 
-use crate::{Gatherer, GathererInner, InternedName};
+use crate::{Dir, Gatherer, GathererInner, InternedName};
 
 /// Space efficient storage of paths. Instead storing full path-names it stores only interned
 /// strings of the actual object names and a reference to its parent. ObjectPaths are reference counted.
@@ -21,6 +22,7 @@ impl ObjectPath {
         ObjectPath(Arc::new(ObjectPathInner {
             parent:   None,
             name:     InternedName::new(path.as_ref().as_os_str()),
+            dir:      RCell::default(),
             gatherer: gatherer.downgrade(),
             watched:  AtomicBool::new(false),
         }))
@@ -31,6 +33,7 @@ impl ObjectPath {
         ObjectPath(Arc::new(ObjectPathInner {
             parent:   None,
             name:     InternedName::new(path.as_ref().as_os_str()),
+            dir:      RCell::default(),
             gatherer: Weak::new(),
             watched:  AtomicBool::new(false),
         }))
@@ -42,6 +45,7 @@ impl ObjectPath {
         ObjectPath(Arc::new(ObjectPathInner {
             parent: Some(self.clone()),
             name,
+            dir: RCell::default(),
             gatherer: gatherer.downgrade(),
             watched: AtomicBool::new(false),
         }))
@@ -54,6 +58,7 @@ impl ObjectPath {
         ObjectPath(Arc::new(ObjectPathInner {
             parent: Some(self.clone()),
             name,
+            dir: RCell::default(),
             gatherer: Weak::new(),
             watched: AtomicBool::new(false),
         }))
@@ -128,15 +133,35 @@ impl ObjectPath {
     }
 
     /// Sets the notification state on this ObjectPath. When true and all processing handles get
-    /// dropped a notification is issued.
+    /// dropped a notification is issued. Watching an ObjectPath also retains its dir handle.
     pub fn watch(&self, watch: bool) {
         self.0.watched.store(watch, atomic::Ordering::Relaxed);
+        self.0.dir.retain();
     }
 
     /// Queries the notification state on this ObjectPath. When true and all processing handles get
     /// dropped a notification is issued.
     pub fn is_watched(&self) -> bool {
         self.0.watched.load(atomic::Ordering::Relaxed)
+    }
+
+    /// Sets the dir handle to either a Arc<Dir> or Weak<Dir> depending on the watch state.
+    pub fn set_dir(&self, dir: &Arc<Dir>) {
+        if self.is_watched() {
+            self.0.dir.replace(dir.clone());
+        } else {
+            self.0.dir.replace(Arc::downgrade(dir));
+        }
+    }
+
+    /// Tries to acquire the associated Dir handle.
+    pub fn get_dir(&self) -> Option<Arc<Dir>> {
+        self.0.dir.request()
+    }
+
+    /// Makes the dir handle a weak link.
+    pub fn release_dir(&self) {
+        self.0.dir.release();
     }
 
     /// Returns am Arc handle to the Gatherer if available
@@ -172,7 +197,14 @@ pub struct ObjectPathInner {
     parent: Option<ObjectPath>,
     name:   InternedName,
 
-    // PLANNED: include enum MaybeHandle Weak/Strong/None Weak(Weak<Dir>) ...
+    #[derivative(
+        Hash = "ignore",
+        PartialEq = "ignore",
+        PartialOrd = "ignore",
+        Ord = "ignore"
+    )]
+    dir: RCell<Dir>,
+
     #[derivative(
         Hash = "ignore",
         PartialEq = "ignore",
@@ -180,13 +212,14 @@ pub struct ObjectPathInner {
         Ord = "ignore"
     )]
     gatherer: Weak<GathererInner>,
+
     #[derivative(
         Hash = "ignore",
         PartialEq = "ignore",
         PartialOrd = "ignore",
         Ord = "ignore"
     )]
-    watched:  AtomicBool,
+    watched: AtomicBool,
 }
 
 use std::fmt;
