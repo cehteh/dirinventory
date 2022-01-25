@@ -21,7 +21,7 @@ impl ObjectPath {
     pub fn new<P: AsRef<Path>>(path: P, gatherer: &Gatherer) -> ObjectPath {
         ObjectPath(Arc::new(ObjectPathInner {
             parent:   None,
-            name:     InternedName::new(path.as_ref().as_os_str()),
+            name:     gatherer.name_interning(path.as_ref().as_os_str()),
             dir:      RCell::default(),
             gatherer: gatherer.downgrade(),
             watched:  AtomicBool::new(false),
@@ -41,26 +41,26 @@ impl ObjectPath {
 
     /// Creates a new ObjectPath as sub-object to some existing ObjectPath object.
     #[must_use]
-    pub fn sub_object(&self, name: InternedName, gatherer: &Gatherer) -> ObjectPath {
+    pub fn sub_object<P: AsRef<Path>>(&self, name: P, gatherer: &Gatherer) -> ObjectPath {
         ObjectPath(Arc::new(ObjectPathInner {
-            parent: Some(self.clone()),
-            name,
-            dir: RCell::default(),
+            parent:   Some(self.clone()),
+            name:     gatherer.name_interning(name.as_ref().as_os_str()),
+            dir:      RCell::default(),
             gatherer: gatherer.downgrade(),
-            watched: AtomicBool::new(false),
+            watched:  AtomicBool::new(false),
         }))
     }
 
     /// Creates a new ObjectPath as sub-object to some existing ObjectPath object without
     /// associated gatherer.
     #[must_use]
-    pub fn sub_object_without_gatherer(&self, name: InternedName) -> ObjectPath {
+    pub fn sub_object_without_gatherer<P: AsRef<Path>>(&self, name: P) -> ObjectPath {
         ObjectPath(Arc::new(ObjectPathInner {
-            parent: Some(self.clone()),
-            name,
-            dir: RCell::default(),
+            parent:   Some(self.clone()),
+            name:     InternedName::new(name.as_ref().as_os_str()),
+            dir:      RCell::default(),
             gatherer: Weak::new(),
-            watched: AtomicBool::new(false),
+            watched:  AtomicBool::new(false),
         }))
     }
 

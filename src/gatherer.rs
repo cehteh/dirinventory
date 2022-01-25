@@ -5,6 +5,7 @@ use std::sync::{Arc, Weak};
 use std::thread;
 use std::ops::DerefMut;
 use std::path::Path;
+use std::ffi::OsStr;
 
 use mpmcpq::*;
 use crossbeam_channel::{bounded, Receiver, Sender};
@@ -74,6 +75,11 @@ impl Gatherer {
             .iter()
             .map(|(_, r)| r.clone())
             .collect()
+    }
+
+    /// Adds a name to the interned names, returns that.
+    pub fn name_interning(&self, name: &OsStr) -> InternedName {
+        self.0.names.interning(name)
     }
 
     /// Adds a directory to the processing queue of the inventory. This is the main function
@@ -442,11 +448,7 @@ impl GathererHandle<'_> {
         watched: bool,
     ) {
         assert!(matches!(entry.simple_type(), Some(openat::SimpleType::Dir)));
-        let subdir = ObjectPath::sub_object(
-            &parent_path,
-            self.gatherer.0.names.interning(entry.file_name()),
-            self.gatherer,
-        );
+        let subdir = ObjectPath::sub_object(&parent_path, entry.file_name(), self.gatherer);
 
         subdir.watch(watched);
         parent_dir.as_ref().map(|dir| subdir.set_dir(dir));
@@ -477,11 +479,7 @@ impl GathererHandle<'_> {
         parent_path: ObjectPath,
         watched: bool,
     ) {
-        let path = ObjectPath::sub_object(
-            &parent_path,
-            self.gatherer.0.names.interning(entry.file_name()),
-            self.gatherer,
-        );
+        let path = ObjectPath::sub_object(&parent_path, entry.file_name(), self.gatherer);
 
         path.watch(watched);
 
@@ -505,11 +503,7 @@ impl GathererHandle<'_> {
         metadata: openat::Metadata,
         watched: bool,
     ) {
-        let entryname = ObjectPath::sub_object(
-            &parent_path,
-            self.gatherer.0.names.interning(entry.file_name()),
-            self.gatherer,
-        );
+        let entryname = ObjectPath::sub_object(&parent_path, entry.file_name(), self.gatherer);
 
         entryname.watch(watched);
 
