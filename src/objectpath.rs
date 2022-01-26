@@ -3,11 +3,11 @@ use std::ffi::OsStr;
 use std::sync::{Arc, Weak};
 use std::sync::atomic::{self, AtomicBool};
 
-#[allow(unused_imports)]
-pub use log::{debug, error, info, trace, warn};
 use derivative::Derivative;
 use rcell::{RCell, Replace};
 
+#[allow(unused_imports)]
+use crate::{debug, error, info, trace, warn};
 use crate::{Dir, Gatherer, GathererInner, InternedName};
 
 /// Space efficient storage of paths. Instead storing full path-names it stores only interned
@@ -235,8 +235,7 @@ mod test {
     use std::ffi::OsStr;
 
     #[allow(unused_imports)]
-    pub use log::{debug, error, info, trace, warn};
-
+    use crate::{debug, error, info, trace, warn};
     use crate::InternedName;
     use super::ObjectPath;
 

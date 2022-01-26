@@ -4,6 +4,9 @@ use std::io;
 
 use openat_ct as openat;
 
+#[allow(unused_imports)]
+use crate::{debug, error, info, trace, warn};
+
 static USED_HANDLES: AtomicUsize = AtomicUsize::new(0);
 
 /// Return the number of file handles currently in use by Dir.
@@ -57,9 +60,6 @@ impl Drop for Dir {
 
 #[cfg(test)]
 mod test {
-    #[allow(unused_imports)]
-    pub use log::{debug, error, info, trace, warn};
-
     use super::*;
 
     #[test]

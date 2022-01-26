@@ -4,6 +4,9 @@
 #![feature(hash_set_entry)]
 #![feature(once_cell)]
 
+#[allow(unused_imports)]
+pub(crate) use log::{debug, error, info, trace, warn};
+
 mod gatherer;
 pub use gatherer::{Gatherer, GathererBuilder, GathererHandle, ProcessFn, ProcessMessage};
 pub(crate) use gatherer::GathererInner;
@@ -35,9 +38,10 @@ mod test {
     use std::io::Write;
     use std::sync::Once;
 
-    #[allow(unused_imports)]
-    pub use log::{debug, error, info, trace, warn};
     use env_logger;
+
+    #[allow(unused_imports)]
+    use crate::{debug, error, info, trace, warn};
 
     pub fn init_env_logging() {
         static LOGGER: Once = Once::new();

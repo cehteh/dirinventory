@@ -9,10 +9,10 @@ use std::ffi::OsStr;
 
 use mpmcpq::*;
 use crossbeam_channel::{bounded, Receiver, Sender};
-#[allow(unused_imports)]
-pub use log::{debug, error, info, trace, warn};
 use parking_lot::Mutex;
 
+#[allow(unused_imports)]
+use crate::{debug, error, info, trace, warn};
 use crate::*;
 
 /// The type of the user supplied closure/function to process entries.  Takes a GathererHandle
@@ -539,9 +539,6 @@ impl GathererHandle<'_> {
 mod test {
     use std::io::Write;
     use std::os::unix::ffi::OsStrExt;
-
-    #[allow(unused_imports)]
-    pub use log::{debug, error, info, trace, warn};
 
     use super::*;
 
