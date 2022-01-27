@@ -49,26 +49,28 @@ mod test {
     pub fn init_env_logging() {
         static LOGGER: Once = Once::new();
         LOGGER.call_once(|| {
-            let counter: AtomicU64 = AtomicU64::new(0);
-            let seq_num = move || counter.fetch_add(1, Ordering::Relaxed);
-
-            let start = time::Instant::now();
-
             env_logger::Builder::from_default_env()
-                .format(move |buf, record| {
-                    let micros = start.elapsed().as_micros() as u64;
-                    writeln!(
-                        buf,
-                        "{:0>12}: {:0>8}.{:0>6}: {:>5}: {}:{}: {}: {}",
-                        seq_num(),
-                        micros / 1000000,
-                        micros % 1000000,
-                        record.level().as_str(),
-                        record.file().unwrap_or(""),
-                        record.line().unwrap_or(0),
-                        thread::current().name().unwrap_or("UNKNOWN"),
-                        record.args()
-                    )
+                .format({
+                    let counter: AtomicU64 = AtomicU64::new(0);
+                    let seq_num = move || counter.fetch_add(1, Ordering::Relaxed);
+
+                    let start = time::Instant::now();
+
+                    move |buf, record| {
+                        let micros = start.elapsed().as_micros() as u64;
+                        writeln!(
+                            buf,
+                            "{:0>12}: {:0>8}.{:0>6}: {:>5}: {}:{}: {}: {}",
+                            seq_num(),
+                            micros / 1000000,
+                            micros % 1000000,
+                            record.level().as_str(),
+                            record.file().unwrap_or(""),
+                            record.line().unwrap_or(0),
+                            thread::current().name().unwrap_or("UNKNOWN"),
+                            record.args()
+                        )
+                    }
                 })
                 .try_init()
                 .unwrap();
