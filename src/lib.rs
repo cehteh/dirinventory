@@ -8,8 +8,11 @@
 pub(crate) use log::{debug, error, info, trace, warn};
 
 mod gatherer;
-pub use gatherer::{Gatherer, GathererBuilder, GathererHandle, ProcessFn, ProcessMessage};
-pub(crate) use gatherer::GathererInner;
+pub use gatherer::{Gatherer, GathererBuilder, ProcessFn, ProcessMessage};
+pub(crate) use gatherer::{GathererInner, GathererStash};
+
+mod gathererhandle;
+pub use gathererhandle::GathererHandle;
 
 mod messages;
 pub use messages::{DirectoryGatherMessage, InventoryEntryMessage};

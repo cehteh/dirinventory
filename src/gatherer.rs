@@ -33,7 +33,7 @@ pub enum ProcessMessage {
     EndOfDirectory(ObjectPath),
 }
 
-type GathererStash<'a> = Stash<'a, DirectoryGatherMessage, u64>;
+pub(crate) type GathererStash<'a> = Stash<'a, DirectoryGatherMessage, u64>;
 
 /// The Gatherer manages the queues and threads traversing directories.
 /// There should be only one 'Gatherer' around as it is used to merge hardlinks
@@ -56,6 +56,11 @@ impl Gatherer {
     /// Get a Weak reference from a Gatherer.
     pub(crate) fn downgrade(&self) -> Weak<GathererInner> {
         Arc::downgrade(&self.0)
+    }
+
+    /// Access to the inner data.
+    pub(crate) fn inner(&self) -> &GathererInner {
+        &*self.0
     }
 
     /// Returns the an Arc of the receiver side of output channel 'n'.
@@ -103,11 +108,11 @@ impl Gatherer {
     /// called when a watched ObjectPath's strong_count becomes dropped equal or below 2.
     pub(crate) fn notify_path_dropped(&self, path: ObjectPath) {
         (self.0.processor)(
-            GathererHandle {
+            GathererHandle::new(
                 // infallible since caller checked already
-                gatherer: &path.gatherer().unwrap(),
-                stash:    None,
-            },
+                &path.gatherer().unwrap(),
+                None,
+            ),
             ProcessMessage::ObjectDone(path),
             None,
         );
@@ -157,20 +162,14 @@ impl Gatherer {
                                         .map(|dir_iter| {
                                             dir_iter.for_each(|entry| {
                                                 (gatherer.0.processor)(
-                                                    GathererHandle {
-                                                        gatherer: &gatherer,
-                                                        stash:    Some(&stash),
-                                                    },
+                                                    GathererHandle::new(&gatherer, Some(&stash)),
                                                     ProcessMessage::Result(entry, path.clone()),
                                                     Some(dir.clone()),
                                                 );
                                             });
 
                                             (gatherer.0.processor)(
-                                                GathererHandle {
-                                                    gatherer: &gatherer,
-                                                    stash:    Some(&stash),
-                                                },
+                                                GathererHandle::new(&gatherer, Some(&stash)),
                                                 ProcessMessage::EndOfDirectory(path.clone()),
                                                 Some(dir.clone()),
                                             );
@@ -190,10 +189,7 @@ impl Gatherer {
                                                 );
                                             } else {
                                                 (gatherer.0.processor)(
-                                                    GathererHandle {
-                                                        gatherer: &gatherer,
-                                                        stash:    Some(&stash),
-                                                    },
+                                                    GathererHandle::new(&gatherer, Some(&stash)),
                                                     ProcessMessage::Result(Err(err), path.clone()),
                                                     Some(dir),
                                                 );
@@ -213,10 +209,7 @@ impl Gatherer {
                                         );
                                     } else {
                                         (gatherer.0.processor)(
-                                            GathererHandle {
-                                                gatherer: &gatherer,
-                                                stash:    Some(&stash),
-                                            },
+                                            GathererHandle::new(&gatherer, Some(&stash)),
                                             ProcessMessage::Result(Err(err), path.clone()),
                                             parent_dir.clone(),
                                         );
@@ -268,7 +261,12 @@ pub(crate) struct GathererInner {
 
 impl GathererInner {
     /// put a DirectoryGatherMessage on the input queue (traverse sub directories).
-    fn send_dir(&self, message: DirectoryGatherMessage, prio: u64, stash: Option<&GathererStash>) {
+    pub(crate) fn send_dir(
+        &self,
+        message: DirectoryGatherMessage,
+        prio: u64,
+        stash: Option<&GathererStash>,
+    ) {
         let DirectoryGatherMessage::TraverseDirectory { path, .. } = &message;
         trace!(
             "COUNT: {:?} = {} {}",
@@ -294,7 +292,7 @@ impl GathererInner {
     /// Put a message on an output channel. The channels are used modulo the
     /// output_channels.len(), thus can never overflow and a user may use a hash/larger number
     /// than available.
-    fn send_entry(&self, channel: usize, message: InventoryEntryMessage) {
+    pub(crate) fn send_entry(&self, channel: usize, message: InventoryEntryMessage) {
         // Ignore result, the user may have dropped the receiver, but there is nothing we
         // should do about it.
         let _ = unsafe {
@@ -427,111 +425,6 @@ impl GathererBuilder {
     pub fn with_message_batch(mut self, message_batch: usize) -> Self {
         self.message_batch = message_batch;
         self
-    }
-}
-
-/// Defines the API the user defined ProcessFn may use to send data back on the
-/// input queue and output channels.
-pub struct GathererHandle<'a> {
-    gatherer: &'a Gatherer,
-    stash:    Option<&'a GathererStash<'a>>,
-}
-
-impl GathererHandle<'_> {
-    /// Add a (sub-) directory to the input priority queue to be traversed as well.
-    /// This must be a directory, otherwise it panics.
-    pub fn traverse_dir(
-        &self,
-        entry: &openat::Entry,
-        parent_path: ObjectPath,
-        parent_dir: Option<Arc<Dir>>,
-        watched: bool,
-    ) {
-        assert!(matches!(entry.simple_type(), Some(openat::SimpleType::Dir)));
-        let subdir = ObjectPath::sub_object(&parent_path, entry.file_name(), self.gatherer);
-
-        subdir.watch(watched);
-        parent_dir.as_ref().map(|dir| subdir.set_dir(dir));
-
-        // The Order of directory traversal is defined by the 64bit priority in the
-        // PriorityQueue. This 64bit are composed of the inode number added directory
-        // depth inversed from u64::MAX down shifted by 48 bits (resulting in the
-        // upper 16bits for the priority). This results in that directories are
-        // traversed depth first in inode increasing order.
-        // PLANNED: When deeper than 64k consider it as loop? do a explicit loop check?
-        let dir_prio = ((u16::MAX - subdir.depth()) as u64) << 48;
-        let message = DirectoryGatherMessage::new_dir(subdir);
-
-        self.gatherer.0.send_dir(
-            message.with_parent_dir(parent_dir),
-            dir_prio + entry.inode(),
-            self.stash,
-        );
-    }
-
-    /// Sends openat::Entry components to the output channel. 'channel' can be any number as send wraps
-    /// it by modulo the real number of channels. This allows to use any usize hash or
-    /// otherwise large number.
-    pub fn output_entry(
-        &self,
-        channel: usize,
-        entry: &openat::Entry,
-        parent_path: ObjectPath,
-        watched: bool,
-    ) {
-        let path = ObjectPath::sub_object(&parent_path, entry.file_name(), self.gatherer);
-
-        path.watch(watched);
-
-        self.gatherer
-            .0
-            .send_entry(channel, InventoryEntryMessage::Entry {
-                path,
-                file_type: entry.simple_type(),
-                inode: entry.inode(),
-            });
-    }
-
-    /// Sends openat::Metadata to the output channel.  'channel' can be any number as send wraps
-    /// it by modulo the actual number of channels. This allows to use any usize hash or
-    /// otherwise large number.
-    pub fn output_metadata(
-        &self,
-        channel: usize,
-        entry: &openat::Entry,
-        parent_path: ObjectPath,
-        metadata: openat::Metadata,
-        watched: bool,
-    ) {
-        let entryname = ObjectPath::sub_object(&parent_path, entry.file_name(), self.gatherer);
-
-        entryname.watch(watched);
-
-        self.gatherer
-            .0
-            .send_entry(channel, InventoryEntryMessage::Metadata {
-                path: entryname,
-                metadata,
-            });
-    }
-
-    /// Sends the ObjectDone notificaton to the output channel.  'channel' can be any number
-    /// as send wraps it by modulo the actual number of channels. This allows to use any usize
-    /// hash or otherwise large number.
-    pub fn output_object_done(&self, channel: usize, path: ObjectPath) {
-        self.gatherer
-            .0
-            .send_entry(channel, InventoryEntryMessage::ObjectDone { path });
-    }
-
-    /// Sends an error to the output channel.  'channel' can be any number as send wraps
-    /// it by modulo the real number of channels. This allows to use any usize hash or
-    /// otherwise large number.
-    pub fn output_error(&self, channel: usize, error: DynError, path: ObjectPath) {
-        warn!("{:?} at {:?}", error, path);
-        self.gatherer
-            .0
-            .send_entry(channel, InventoryEntryMessage::Err { path, error });
     }
 }
 
