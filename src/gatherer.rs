@@ -19,7 +19,7 @@ use crate::*;
 /// which defines the API for pushing things back on the Gatherers queues and a ProcessMessage
 /// which wraps the things to be handled.
 // PLANNED: Dir will become part of ObjectPath
-pub type ProcessFn = dyn Fn(GathererHandle, ProcessMessage, Option<Arc<Dir>>) + Send + Sync;
+pub type ProcessFn = dyn Fn(GathererHandle, ProcessMessage) + Send + Sync;
 
 /// The input to the ProcessFn which dispatches actions on the queues via the GathererHandle.
 pub enum ProcessMessage {
@@ -114,108 +114,99 @@ impl Gatherer {
                 None,
             ),
             ProcessMessage::ObjectDone(path),
-            None,
         );
     }
 
     /// Spawns a single gatherer thread
     fn spawn_gather_thread(&self, n: usize) -> io::Result<thread::JoinHandle<()>> {
-        let gatherer = Gatherer(self.0.clone());
-        thread::Builder::new()
-            .name(format!("gather/{}", n))
-            .spawn(move || {
-                debug!("thread started: {}", thread::current().name().unwrap());
+        thread::Builder::new().name(format!("gather/{}", n)).spawn({
+            let gatherer = Gatherer(self.0.clone());
+            move || {
+                debug!("thread started");
                 let stash: GathererStash = Stash::new(&gatherer.0.dirs_queue);
                 loop {
                     use DirectoryGatherMessage::*;
 
                     // TODO: messages for dir enter/leave on the ouput queue
                     match gatherer.0.dirs_queue.recv_guard().message() {
-                        mpmcpq::Message::Msg(TraverseDirectory { path, parent_dir }, prio) => {
-                            if used_handles() >= gatherer.0.fd_limit {
+                        mpmcpq::Message::Msg(TraverseDirectory { path }, prio) => {
+                            if used_handles() <= gatherer.0.fd_limit {
+                                path.dir()
+                                    .map(|dir| {
+                                        trace!(
+                                            "opened fd {:?}: for {:?}: depth {}",
+                                            dir,
+                                            path.to_pathbuf(),
+                                            path.depth()
+                                        );
+
+                                        // Clone the path to increment the refcount to trigger notification reliably
+                                        let path = path.clone();
+                                        dir.list_self()
+                                            .map(|dir_iter| {
+                                                dir_iter.for_each(|entry| {
+                                                    (gatherer.0.processor)(
+                                                        GathererHandle::new(
+                                                            &gatherer,
+                                                            Some(&stash),
+                                                        ),
+                                                        ProcessMessage::Result(entry, path.clone()),
+                                                    );
+                                                });
+
+                                                (gatherer.0.processor)(
+                                                    GathererHandle::new(&gatherer, Some(&stash)),
+                                                    ProcessMessage::EndOfDirectory(path.clone()),
+                                                );
+
+                                                gatherer.0.dirs_queue.sync(&stash);
+                                                // path.adjust_dir();
+                                                crate::dirhandle::dec_handles();
+                                            })
+                                            .map_err(|err| {
+                                                if err.raw_os_error() == Some(libc::EMFILE) {
+                                                    gatherer.0.resend_dir(
+                                                        TraverseDirectory { path: path.clone() },
+                                                        *prio,
+                                                        &stash,
+                                                    );
+                                                } else {
+                                                    (gatherer.0.processor)(
+                                                        GathererHandle::new(
+                                                            &gatherer,
+                                                            Some(&stash),
+                                                        ),
+                                                        ProcessMessage::Result(
+                                                            Err(err),
+                                                            path.clone(),
+                                                        ),
+                                                    );
+                                                }
+                                            })
+                                    })
+                                    .map_err(|err| {
+                                        if err.raw_os_error() == Some(libc::EMFILE) {
+                                            warn!("filehandles exhausted");
+                                            gatherer.0.resend_dir(
+                                                TraverseDirectory { path: path.clone() },
+                                                *prio,
+                                                &stash,
+                                            );
+                                        } else {
+                                            (gatherer.0.processor)(
+                                                GathererHandle::new(&gatherer, Some(&stash)),
+                                                ProcessMessage::Result(Err(err), path.clone()),
+                                            );
+                                        }
+                                    })
+                                    .ok();
+                            } else {
                                 warn!("filehandle limit reached");
                                 gatherer.0.resend_dir(
-                                    TraverseDirectory {
-                                        path:       path.clone(),
-                                        parent_dir: parent_dir.clone(),
-                                    },
+                                    TraverseDirectory { path: path.clone() },
                                     *prio,
                                     &stash,
                                 );
-                            } else {
-                                match parent_dir {
-                                    Some(dir) => dir.sub_dir(path.name()),
-                                    None => Dir::open(&path.to_pathbuf()),
-                                }
-                                .map(|dir| {
-                                    trace!(
-                                        "opened fd {:?}: for {:?}: depth {}",
-                                        dir,
-                                        path.to_pathbuf(),
-                                        path.depth()
-                                    );
-
-                                    let dir = Arc::new(dir);
-                                    // Clone the path to increment the refcount to trigger notification reliably
-                                    let path = path.clone();
-                                    dir.list_self()
-                                        .map(|dir_iter| {
-                                            dir_iter.for_each(|entry| {
-                                                (gatherer.0.processor)(
-                                                    GathererHandle::new(&gatherer, Some(&stash)),
-                                                    ProcessMessage::Result(entry, path.clone()),
-                                                    Some(dir.clone()),
-                                                );
-                                            });
-
-                                            (gatherer.0.processor)(
-                                                GathererHandle::new(&gatherer, Some(&stash)),
-                                                ProcessMessage::EndOfDirectory(path.clone()),
-                                                Some(dir.clone()),
-                                            );
-
-                                            gatherer.0.dirs_queue.sync(&stash);
-                                            crate::dirhandle::dec_handles();
-                                        })
-                                        .map_err(|err| {
-                                            if err.raw_os_error() == Some(libc::EMFILE) {
-                                                gatherer.0.resend_dir(
-                                                    TraverseDirectory {
-                                                        path:       path.clone(),
-                                                        parent_dir: parent_dir.clone(),
-                                                    },
-                                                    *prio,
-                                                    &stash,
-                                                );
-                                            } else {
-                                                (gatherer.0.processor)(
-                                                    GathererHandle::new(&gatherer, Some(&stash)),
-                                                    ProcessMessage::Result(Err(err), path.clone()),
-                                                    Some(dir),
-                                                );
-                                            }
-                                        })
-                                })
-                                .map_err(|err| {
-                                    if err.raw_os_error() == Some(libc::EMFILE) {
-                                        warn!("filehandles exhausted");
-                                        gatherer.0.resend_dir(
-                                            TraverseDirectory {
-                                                path:       path.clone(),
-                                                parent_dir: parent_dir.clone(),
-                                            },
-                                            *prio,
-                                            &stash,
-                                        );
-                                    } else {
-                                        (gatherer.0.processor)(
-                                            GathererHandle::new(&gatherer, Some(&stash)),
-                                            ProcessMessage::Result(Err(err), path.clone()),
-                                            parent_dir.clone(),
-                                        );
-                                    }
-                                })
-                                .ok();
                             }
                         }
                         mpmcpq::Message::Drained => {
@@ -227,7 +218,8 @@ impl Gatherer {
                         _ => unimplemented!(),
                     }
                 }
-            })
+            }
+        })
     }
 }
 
@@ -267,14 +259,6 @@ impl GathererInner {
         prio: u64,
         stash: Option<&GathererStash>,
     ) {
-        let DirectoryGatherMessage::TraverseDirectory { path, .. } = &message;
-        trace!(
-            "COUNT: {:?} = {} {}",
-            path,
-            path.strong_count(),
-            path.is_watched()
-        );
-
         if let Some(stash) = stash {
             self.dirs_queue
                 .send_batched(message, prio, self.message_batch, stash);
@@ -440,8 +424,49 @@ mod test {
     fn smoke() {
         crate::test::init_env_logging();
         let _ = Gatherer::build().with_gather_threads(1).start(Box::new(
-            |_gatherer: GathererHandle, _entry: ProcessMessage, _parent_dir: Option<Arc<Dir>>| {},
+            |_gatherer: GathererHandle, _entry: ProcessMessage| {},
         ));
+    }
+
+    #[test]
+    fn dir_smoke() {
+        crate::test::init_env_logging();
+
+        let gatherer = Gatherer::build()
+            .with_gather_threads(4)
+            .start(Box::new(
+                |gatherer: GathererHandle, entry: ProcessMessage| match entry {
+                    ProcessMessage::Result(Ok(entry), parent_path) => match entry.simple_type() {
+                        Some(openat::SimpleType::Dir) => {
+                            trace!("{:?}", parent_path.to_pathbuf());
+                            gatherer.traverse_dir(&entry, parent_path.clone(), false);
+                        }
+                        _ => {
+                            trace!("{:?}/{:?}", parent_path.to_pathbuf(), entry.file_name());
+                            gatherer.output_entry(0, &entry, parent_path, false);
+                        }
+                    },
+                    ProcessMessage::Result(Err(err), parent_path) => {
+                        gatherer.output_error(0, Box::new(err), parent_path);
+                    }
+                    _ => {}
+                },
+            ))
+            .unwrap();
+
+        gatherer.load_dir_recursive("src", false);
+
+        gatherer
+            .channel(0)
+            .iter()
+            .take_while(|msg| !matches!(msg, InventoryEntryMessage::Done))
+            .for_each(|msg| {
+                if let Some(path) = msg.path() {
+                    trace!("{:?}", path.to_pathbuf());
+                } else if msg.is_error() {
+                    error!("{:?}", msg)
+                }
+            });
     }
 
     #[test]
@@ -453,28 +478,20 @@ mod test {
             .with_gather_threads(64)
             .with_fd_limit(768)
             .start(Box::new(
-                |gatherer: GathererHandle, entry: ProcessMessage, parent_dir: Option<Arc<Dir>>| {
-                    match entry {
-                        ProcessMessage::Result(Ok(entry), parent_path) => match entry.simple_type()
-                        {
-                            Some(openat::SimpleType::Dir) => {
-                                gatherer.traverse_dir(
-                                    &entry,
-                                    parent_path.clone(),
-                                    parent_dir.clone(),
-                                    false,
-                                );
-                                gatherer.output_entry(0, &entry, parent_path.clone(), false);
-                            }
-                            _ => {
-                                gatherer.output_entry(0, &entry, parent_path, false);
-                            }
-                        },
-                        ProcessMessage::Result(Err(err), parent_path) => {
-                            gatherer.output_error(0, Box::new(err), parent_path);
+                |gatherer: GathererHandle, entry: ProcessMessage| match entry {
+                    ProcessMessage::Result(Ok(entry), parent_path) => match entry.simple_type() {
+                        Some(openat::SimpleType::Dir) => {
+                            gatherer.traverse_dir(&entry, parent_path.clone(), false);
+                            gatherer.output_entry(0, &entry, parent_path.clone(), false);
                         }
-                        _ => {}
+                        _ => {
+                            gatherer.output_entry(0, &entry, parent_path, false);
+                        }
+                    },
+                    ProcessMessage::Result(Err(err), parent_path) => {
+                        gatherer.output_error(0, Box::new(err), parent_path);
                     }
+                    _ => {}
                 },
             ))
             .unwrap();
@@ -503,22 +520,19 @@ mod test {
 
         let gatherer = Gatherer::build()
             .start(Box::new(
-                |gatherer: GathererHandle, entry: ProcessMessage, parent_dir: Option<Arc<Dir>>| {
-                    match entry {
-                        ProcessMessage::Result(Ok(entry), parent_path) => match entry.simple_type()
-                        {
-                            Some(openat::SimpleType::Dir) => {
-                                gatherer.traverse_dir(&entry, parent_path, parent_dir, false);
-                            }
-                            _ => {
-                                gatherer.output_entry(0, &entry, parent_path, false);
-                            }
-                        },
-                        ProcessMessage::Result(Err(err), parent_path) => {
-                            gatherer.output_error(0, Box::new(err), parent_path);
+                |gatherer: GathererHandle, entry: ProcessMessage| match entry {
+                    ProcessMessage::Result(Ok(entry), parent_path) => match entry.simple_type() {
+                        Some(openat::SimpleType::Dir) => {
+                            gatherer.traverse_dir(&entry, parent_path, false);
                         }
-                        _ => {}
+                        _ => {
+                            gatherer.output_entry(0, &entry, parent_path, false);
+                        }
+                    },
+                    ProcessMessage::Result(Err(err), parent_path) => {
+                        gatherer.output_error(0, Box::new(err), parent_path);
                     }
+                    _ => {}
                 },
             ))
             .unwrap();
@@ -545,38 +559,24 @@ mod test {
 
         let gatherer = Gatherer::build()
             .start(Box::new(
-                |gatherer: GathererHandle, entry: ProcessMessage, parent_dir: Option<Arc<Dir>>| {
-                    match entry {
-                        ProcessMessage::Result(Ok(entry), parent_path) => match entry.simple_type()
-                        {
-                            Some(openat::SimpleType::Dir) => {
-                                gatherer.traverse_dir(
-                                    &entry,
-                                    parent_path.clone(),
-                                    parent_dir,
-                                    false,
-                                );
-                            }
-                            _ => match parent_dir.clone().unwrap().metadata(entry.file_name()) {
-                                Ok(metadata) => {
-                                    gatherer.output_metadata(
-                                        0,
-                                        &entry,
-                                        parent_path,
-                                        metadata,
-                                        false,
-                                    );
-                                }
-                                Err(err) => {
-                                    gatherer.output_error(0, Box::new(err), parent_path);
-                                }
-                            },
-                        },
-                        ProcessMessage::Result(Err(err), parent_path) => {
-                            gatherer.output_error(0, Box::new(err), parent_path);
+                |gatherer: GathererHandle, entry: ProcessMessage| match entry {
+                    ProcessMessage::Result(Ok(entry), parent_path) => match entry.simple_type() {
+                        Some(openat::SimpleType::Dir) => {
+                            gatherer.traverse_dir(&entry, parent_path.clone(), false);
                         }
-                        _ => {}
+                        _ => match parent_path.dir().unwrap().metadata(entry.file_name()) {
+                            Ok(metadata) => {
+                                gatherer.output_metadata(0, &entry, parent_path, metadata, false);
+                            }
+                            Err(err) => {
+                                gatherer.output_error(0, Box::new(err), parent_path);
+                            }
+                        },
+                    },
+                    ProcessMessage::Result(Err(err), parent_path) => {
+                        gatherer.output_error(0, Box::new(err), parent_path);
                     }
+                    _ => {}
                 },
             ))
             .unwrap();
@@ -603,26 +603,23 @@ mod test {
 
         let gatherer = Gatherer::build()
             .start(Box::new(
-                |gatherer: GathererHandle, entry: ProcessMessage, parent_dir: Option<Arc<Dir>>| {
-                    match entry {
-                        ProcessMessage::Result(Ok(entry), parent_path) => match entry.simple_type()
-                        {
-                            Some(openat::SimpleType::Dir) => {
-                                gatherer.traverse_dir(&entry, parent_path, parent_dir, true);
-                            }
-                            _ => {
-                                gatherer.output_entry(0, &entry, parent_path, true);
-                            }
-                        },
-                        ProcessMessage::Result(Err(err), parent_path) => {
-                            gatherer.output_error(0, Box::new(err), parent_path);
+                |gatherer: GathererHandle, entry: ProcessMessage| match entry {
+                    ProcessMessage::Result(Ok(entry), parent_path) => match entry.simple_type() {
+                        Some(openat::SimpleType::Dir) => {
+                            gatherer.traverse_dir(&entry, parent_path, true);
                         }
-                        ProcessMessage::ObjectDone(path) => {
-                            trace!("got notified: {:?}", path);
-                            gatherer.output_object_done(0, path);
+                        _ => {
+                            gatherer.output_entry(0, &entry, parent_path, true);
                         }
-                        _ => {}
+                    },
+                    ProcessMessage::Result(Err(err), parent_path) => {
+                        gatherer.output_error(0, Box::new(err), parent_path);
                     }
+                    ProcessMessage::ObjectDone(path) => {
+                        trace!("got notified: {:?}", path);
+                        gatherer.output_object_done(0, path);
+                    }
+                    _ => {}
                 },
             ))
             .unwrap();

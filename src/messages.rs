@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use crate::*;
 
 /// Messages on the input queue, directories to be processed.
@@ -9,9 +7,7 @@ pub enum DirectoryGatherMessage {
     /// itself will be opened by the thread processing it.
     TraverseDirectory {
         /// The path to the Object
-        path:       ObjectPath,
-        /// Optional handle to the parent directory
-        parent_dir: Option<Arc<Dir>>,
+        path: ObjectPath,
     },
     // internally used by drop to terminate all threads
     // Shutdown,
@@ -20,22 +16,7 @@ pub enum DirectoryGatherMessage {
 impl DirectoryGatherMessage {
     /// Create a new 'TraverseDirectory' message.
     pub fn new_dir(path: ObjectPath) -> Self {
-        DirectoryGatherMessage::TraverseDirectory {
-            path,
-            parent_dir: None,
-        }
-    }
-
-    /// Attach a parent handle to a 'TraverseDirectory' message. Must not be used with other messages!
-    #[must_use]
-    pub fn with_parent_dir(mut self, parent: Option<Arc<Dir>>) -> Self {
-        debug_assert!(matches!(
-            self,
-            DirectoryGatherMessage::TraverseDirectory { .. }
-        ));
-        let DirectoryGatherMessage::TraverseDirectory { parent_dir, .. } = &mut self;
-        *parent_dir = parent;
-        self
+        DirectoryGatherMessage::TraverseDirectory { path }
     }
 }
 

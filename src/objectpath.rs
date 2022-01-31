@@ -2,9 +2,10 @@ use std::path::{Path, PathBuf};
 use std::ffi::OsStr;
 use std::sync::{Arc, Weak};
 use std::sync::atomic::{self, AtomicBool};
+use std::io;
 
+use parking_lot::Mutex;
 use derivative::Derivative;
-use rcell::{RCell, Replace};
 
 #[allow(unused_imports)]
 use crate::{debug, error, info, trace, warn};
@@ -18,11 +19,12 @@ pub struct ObjectPath(Arc<ObjectPathInner>);
 
 impl ObjectPath {
     /// Creates a new ObjectPath without a parent.
-    pub fn new<P: AsRef<Path>>(path: P, gatherer: &Gatherer) -> ObjectPath {
+    // pub fn new<P: AsRef<Path>>(path: P, gatherer: &Gatherer) -> ObjectPath {
+    pub fn new(path: impl AsRef<Path>, gatherer: &Gatherer) -> ObjectPath {
         ObjectPath(Arc::new(ObjectPathInner {
             parent:   None,
             name:     gatherer.name_interning(path.as_ref().as_os_str()),
-            dir:      RCell::default(),
+            dir:      Mutex::new(None),
             gatherer: gatherer.downgrade(),
             watched:  AtomicBool::new(false),
         }))
@@ -33,7 +35,7 @@ impl ObjectPath {
         ObjectPath(Arc::new(ObjectPathInner {
             parent:   None,
             name:     InternedName::new(path.as_ref().as_os_str()),
-            dir:      RCell::default(),
+            dir:      Mutex::new(None),
             gatherer: Weak::new(),
             watched:  AtomicBool::new(false),
         }))
@@ -45,7 +47,7 @@ impl ObjectPath {
         ObjectPath(Arc::new(ObjectPathInner {
             parent:   Some(self.clone()),
             name:     gatherer.name_interning(name.as_ref().as_os_str()),
-            dir:      RCell::default(),
+            dir:      Mutex::new(None),
             gatherer: gatherer.downgrade(),
             watched:  AtomicBool::new(false),
         }))
@@ -58,7 +60,7 @@ impl ObjectPath {
         ObjectPath(Arc::new(ObjectPathInner {
             parent:   Some(self.clone()),
             name:     InternedName::new(name.as_ref().as_os_str()),
-            dir:      RCell::default(),
+            dir:      Mutex::new(None),
             gatherer: Weak::new(),
             watched:  AtomicBool::new(false),
         }))
@@ -114,6 +116,7 @@ impl ObjectPath {
 
     /// Return the metadata of an objectpath
     pub fn metadata(&self) -> std::io::Result<crate::openat::Metadata> {
+        // FIXME: use parents dir handle if available
         let parent = if let Some(parent) = &self.0.parent {
             parent.to_pathbuf()
         } else {
@@ -136,7 +139,7 @@ impl ObjectPath {
     /// dropped a notification is issued. Watching an ObjectPath also retains its dir handle.
     pub fn watch(&self, watch: bool) {
         self.0.watched.store(watch, atomic::Ordering::Relaxed);
-        self.0.dir.retain();
+        // self.0.dir.lru_preserve();
     }
 
     /// Queries the notification state on this ObjectPath. When true and all processing handles get
@@ -145,28 +148,46 @@ impl ObjectPath {
         self.0.watched.load(atomic::Ordering::Relaxed)
     }
 
-    /// Sets the dir handle to either a Arc<Dir> or Weak<Dir> depending on the watch state.
-    pub fn set_dir(&self, dir: &Arc<Dir>) {
-        if self.is_watched() {
-            self.0.dir.replace(dir.clone());
-        } else {
-            self.0.dir.replace(Arc::downgrade(dir));
-        }
+    /// Gets a dir handle for this object.
+    pub fn dir(&self) -> io::Result<Arc<Dir>> {
+        let mut locked_dir = self.0.dir.lock();
+
+        Ok(match locked_dir.as_ref().map(Weak::upgrade) {
+            Some(Some(arc)) => {
+                trace!("OPEN reuse handle {:?}", self);
+                arc
+            }
+            _ => {
+                let dir_arc = Arc::new(
+                    match self
+                        .parent()
+                        .map(|parent| parent.0.dir.lock().as_ref().map(Weak::upgrade))
+                    {
+                        Some(Some(Some(parent_handle))) => {
+                            trace!("OPEN subdir {:?}", self);
+                            parent_handle.sub_dir(self.name())?
+                        }
+                        _ => {
+                            trace!("OPEN new {:?}", self);
+                            Dir::open(&self.to_pathbuf())?
+                        }
+                    },
+                );
+                *locked_dir = Some(Arc::downgrade(&dir_arc));
+
+                dir_arc
+            }
+        })
     }
 
-    /// Tries to acquire the associated Dir handle.
-    pub fn get_dir(&self) -> Option<Arc<Dir>> {
-        self.0.dir.request()
-    }
-
-    /// Makes the dir handle a weak link.
-    pub fn release_dir(&self) {
-        self.0.dir.release();
-    }
-
-    /// Returns am Arc handle to the Gatherer if available
+    /// Returns an Arc handle to the Gatherer if available
     pub fn gatherer(&self) -> Option<Gatherer> {
         Gatherer::upgrade(&self.0.gatherer)
+    }
+
+    /// Returns the parent if available
+    pub fn parent(&self) -> Option<&ObjectPath> {
+        self.0.parent.as_ref()
     }
 }
 
@@ -203,7 +224,7 @@ pub struct ObjectPathInner {
         PartialOrd = "ignore",
         Ord = "ignore"
     )]
-    dir: RCell<Dir>,
+    dir: Mutex<Option<Weak<Dir>>>,
 
     #[derivative(
         Hash = "ignore",

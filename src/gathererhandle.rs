@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 #[allow(unused_imports)]
 use crate::{debug, error, info, trace, warn};
 use crate::*;
@@ -20,16 +18,10 @@ impl GathererHandle<'_> {
     }
 
     /// Add a (sub-) directory to the input priority queue to be traversed as well.
-    /// This must be a directory, otherwise it panics.
-    pub fn traverse_dir(
-        &self,
-        entry: &openat::Entry,
-        parent_path: ObjectPath,
-        _dir_removeme: Option<Arc<Dir>>,
-        watched: bool,
-    ) {
+    /// This must be a directory, otherwise it panics.y
+    pub fn traverse_dir(&self, entry: &openat::Entry, parent_path: ObjectPath, watched: bool) {
         assert!(matches!(entry.simple_type(), Some(openat::SimpleType::Dir)));
-        let subdir = ObjectPath::sub_object(&parent_path, entry.file_name(), self.gatherer);
+        let subdir = parent_path.sub_object(entry.file_name(), self.gatherer);
 
         subdir.watch(watched);
         // FIXME: retain parent_path's dir? may need ObjectPath::adjust() to change Arc/Weak

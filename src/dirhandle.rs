@@ -25,14 +25,14 @@ pub struct Dir(openat::Dir);
 
 impl Dir {
     /// see openat::open()
-    pub fn open<P: openat::AsPath>(path: P) -> io::Result<Dir> {
+    pub fn open<P: openat::AsPath + std::fmt::Debug>(path: P) -> io::Result<Dir> {
         let dir = openat::Dir::flags().with(openat::O_DIRECTORY).open(path)?;
         USED_HANDLES.fetch_add(1, Ordering::Relaxed);
         Ok(Dir(dir))
     }
 
     /// see openat::sub_dir()
-    pub fn sub_dir<P: openat::AsPath>(&self, path: P) -> io::Result<Dir> {
+    pub fn sub_dir<P: openat::AsPath + std::fmt::Debug>(&self, path: P) -> io::Result<Dir> {
         let dir = self.0.with(openat::O_DIRECTORY).sub_dir(path)?;
         USED_HANDLES.fetch_add(1, Ordering::Relaxed);
         Ok(Dir(dir))
