@@ -92,7 +92,12 @@ impl Gatherer {
     // pub fn load_dir_recursive(&self, path: ObjectPath) {
     pub fn load_dir_recursive<P: AsRef<Path>>(&self, path: P, watch: bool) {
         let path = ObjectPath::new(path, self);
+        if let Ok(dir) = path.dir() {
+            self.0.dirs_lru.preserve(dir);
+        };
+
         path.watch(watch);
+
         let mut stash = self.0.kickoff_stash.lock();
         self.0.send_dir(
             DirectoryGatherMessage::new_dir(path),
@@ -130,6 +135,10 @@ impl Gatherer {
                     // TODO: messages for dir enter/leave on the ouput queue
                     match gatherer.0.dirs_queue.recv_guard().message() {
                         mpmcpq::Message::Msg(TraverseDirectory { path }, prio) => {
+                            gatherer.0.dirs_lru.expire_until(gatherer.0.lru_batch, &|| {
+                                used_handles() <= gatherer.0.fd_limit
+                            });
+
                             if used_handles() <= gatherer.0.fd_limit {
                                 path.dir()
                                     .map(|dir| {
@@ -139,6 +148,8 @@ impl Gatherer {
                                             path.to_pathbuf(),
                                             path.depth()
                                         );
+
+                                        gatherer.0.dirs_lru.preserve(dir.clone());
 
                                         // Clone the path to increment the refcount to trigger notification reliably
                                         let path = path.clone();
@@ -247,7 +258,11 @@ pub(crate) struct GathererInner {
     /// The maximum number of file descriptors this Gatherer may use.
     fd_limit: usize,
 
-    /// Number of DirectoryGathermessages batched together
+    /// LruList for keeping dir handles alive.
+    dirs_lru:  LruList<Dir>,
+    lru_batch: usize,
+
+    /// Number of DirectoryGather Messages batched together
     message_batch: usize,
 }
 
@@ -294,6 +309,7 @@ pub struct GathererBuilder {
     num_output_channels: usize,
     inventory_backlog:   usize,
     fd_limit:            usize,
+    lru_batch:           usize,
     message_batch:       usize,
 }
 
@@ -310,6 +326,7 @@ impl GathererBuilder {
             num_output_channels: 1,
             inventory_backlog:   0,
             fd_limit:            512,
+            lru_batch:           4,
             message_batch:       512,
         }
     }
@@ -340,6 +357,8 @@ impl GathererBuilder {
             processor,
             kickoff_stash: Mutex::new(GathererStash::new_without_priority_queue()),
             fd_limit: self.fd_limit,
+            dirs_lru: LruList::new(),
+            lru_batch: self.lru_batch,
             message_batch: self.message_batch,
         }));
 
@@ -410,6 +429,13 @@ impl GathererBuilder {
         self.message_batch = message_batch;
         self
     }
+
+    /// Sets size of dir lru expires batched together.
+    #[must_use = "GathererBuilder must be used, call .start()"]
+    pub fn with_lru_batch(mut self, lru_batch: usize) -> Self {
+        self.lru_batch = lru_batch;
+        self
+    }
 }
 
 #[cfg(test)]
@@ -438,7 +464,7 @@ mod test {
                 |gatherer: GathererHandle, entry: ProcessMessage| match entry {
                     ProcessMessage::Result(Ok(entry), parent_path) => match entry.simple_type() {
                         Some(openat::SimpleType::Dir) => {
-                            trace!("{:?}", parent_path.to_pathbuf());
+                            trace!("{:?}/{:?}", parent_path.to_pathbuf(), entry.file_name());
                             gatherer.traverse_dir(&entry, parent_path.clone(), false);
                         }
                         _ => {
