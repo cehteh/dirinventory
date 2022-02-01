@@ -20,7 +20,9 @@ impl<T> LruList<T> {
     }
 
     /// Expires up to 'n' elements. Only elements that are really preserved by the LruList are
-    /// counting against 'n'. That is their single reference is here in this list.
+    /// counting against 'n'. That is their single reference is here in this list.  Returns
+    /// 'true' when 'n' elements got expired and false when there where less than 'n' elements
+    /// expirable.
     pub fn expire(&self, mut n: usize) -> bool {
         while n >= 1 {
             match self.1.try_recv() {
@@ -40,12 +42,15 @@ impl<T> LruList<T> {
     }
 
     /// Expires elements in batches of 'n' from a LruList until 'pedicate' returns true.
-    pub fn expire_until(&self, batch: usize, predicate: Box<dyn Fn() -> bool>) {
+    /// Returns 'true' when enough elements to satisfy 'predicate' could be expired and
+    /// 'false' when there where not enough elements to expire.
+    pub fn expire_until(&self, batch: usize, predicate: Box<dyn Fn() -> bool>) -> bool {
         while !predicate() {
             if !self.expire(batch) {
-                return;
+                return false;
             }
         }
+        true
     }
 }
 
