@@ -27,6 +27,9 @@ mod dirhandle;
 pub use dirhandle::{used_handles, Dir};
 pub use openat_ct as openat;
 
+mod lrulist;
+pub(crate) use lrulist::LruList;
+
 /// An user defined processing function can return any kind of error, this needs to be boxed
 /// and dyn. Since error handling is expected to be the slow path, having the allocation and
 /// vtable here shouldn't be an performance issue.
