@@ -55,7 +55,7 @@ impl<T: Debug> LruList<T> {
     /// Expires elements in batches of 'n' from a LruList until 'pedicate' returns true.
     /// Returns 'true' when enough elements to satisfy 'predicate' could be expired and
     /// 'false' when there where not enough elements to expire.
-    pub fn expire_until(&self, batch: usize, predicate: Box<dyn Fn() -> bool>) -> bool {
+    pub fn expire_until(&self, batch: usize, predicate: &dyn Fn() -> bool) -> bool {
         while !predicate() {
             if !self.expire(batch) {
                 return false;
@@ -111,7 +111,7 @@ mod test {
         let b = Arc::new(420);
         lrulist.preserve(b.clone());
 
-        lrulist.expire_until(1, Box::new(move || Arc::strong_count(&b) == 0));
+        lrulist.expire_until(1, &|| Arc::strong_count(&b) == 0);
         assert_eq!(Arc::strong_count(&a), 1);
     }
 }
