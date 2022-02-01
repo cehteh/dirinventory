@@ -1,13 +1,17 @@
 use std::sync::Arc;
+use std::fmt::{self, Debug, Formatter};
 
 use crossbeam_channel::{unbounded, Receiver, Sender};
+
+#[allow(unused_imports)]
+use crate::{debug, error, info, trace, warn};
 
 /// Keeping objects alive by passing Arc's through a channel. As long the object exists in the
 /// channel it can be revived from a Weak pointer. Objects can appear multiply on this
 /// channel, make sure to 'preserve' then only when neccessary.
-pub(crate) struct LruList<T>(Sender<Arc<T>>, Receiver<Arc<T>>);
+pub(crate) struct LruList<T: Debug>(Sender<Arc<T>>, Receiver<Arc<T>>);
 
-impl<T> LruList<T> {
+impl<T: Debug> LruList<T> {
     /// Create a new LruList.
     pub fn new() -> LruList<T> {
         let (s, r) = unbounded();
@@ -16,6 +20,7 @@ impl<T> LruList<T> {
 
     /// Pushes an Arc onto the LruList.
     pub fn preserve(&self, element: Arc<T>) {
+        trace!("preserve {:?}: {:?}", self, element);
         let _ = self.0.send(element);
     }
 
@@ -27,10 +32,16 @@ impl<T> LruList<T> {
         while n >= 1 {
             match self.1.try_recv() {
                 Ok(elem) if Arc::strong_count(&elem) == 1 => {
+                    trace!("expire {:?}: {:?}", self, elem);
                     n -= 1;
                 }
-                Ok(_) => {}
-                Err(_) => return false,
+                Ok(elem) => {
+                    trace!("drop {:?}: {:?}", self, elem);
+                }
+                Err(_) => {
+                    trace!("nothing to expire {:?}", self);
+                    return false;
+                }
             }
         }
         true
@@ -51,6 +62,12 @@ impl<T> LruList<T> {
             }
         }
         true
+    }
+}
+
+impl<T: Debug> Debug for LruList<T> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "{:?}", self as *const Self)
     }
 }
 
