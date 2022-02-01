@@ -2,18 +2,25 @@ use std::sync::Arc;
 
 use crossbeam_channel::{unbounded, Receiver, Sender};
 
+/// Keeping objects alive by passing Arc's through a channel. As long the object exists in the
+/// channel it can be revived from a Weak pointer. Objects can appear multiply on this
+/// channel, make sure to 'preserve' then only when neccessary.
 pub(crate) struct LruList<T>(Sender<Arc<T>>, Receiver<Arc<T>>);
 
 impl<T> LruList<T> {
+    /// Create a new LruList.
     pub fn new() -> LruList<T> {
         let (s, r) = unbounded();
         LruList(s, r)
     }
 
+    /// Pushes an Arc onto the LruList.
     pub fn preserve(&self, element: Arc<T>) {
         let _ = self.0.send(element);
     }
 
+    /// Expires up to 'n' elements. Only elements that are really preserved by the LruList are
+    /// counting against 'n'. That is their single reference is here in this list.
     pub fn expire(&self, mut n: usize) -> bool {
         while n >= 1 {
             match self.1.try_recv() {
@@ -27,10 +34,12 @@ impl<T> LruList<T> {
         true
     }
 
+    /// Expires all elements in the LruList.
     pub fn expire_all(&self) {
         self.expire(usize::MAX);
     }
 
+    /// Expires elements in batches of 'n' from a LruList until 'pedicate' returns true.
     pub fn expire_until(&self, batch: usize, predicate: Box<dyn Fn() -> bool>) {
         while !predicate() {
             if !self.expire(batch) {
